@@ -30,58 +30,59 @@ pub fn vectorize(expr: &mut Expr) {
         //  loops for now.
         if let Some(ref broadcast_idens) = vectorizable(expr) {
             if let For { ref iters, builder: ref init_builder, ref func } = expr.kind {
-                    if let Lambda { ref params, ref body } = func.kind {
-                        // This is the vectorized body.
-                        let mut vectorized_body = body.clone();
-                        vectorized_body.transform_and_continue(&mut |ref mut e| {
-                                                                        let cont = vectorize_expr(e, broadcast_idens).unwrap();
-                                                                        (None, cont)
-                                                                    });
+                if let Lambda { ref params, ref body } = func.kind {
+                    // This is the vectorized body.
+                    let mut vectorized_body = body.clone();
+                    vectorized_body.transform_and_continue(&mut |ref mut e| {
+                        let cont = vectorize_expr(e, broadcast_idens).unwrap();
+                        (None, cont)
+                    });
 
-                        let mut vectorized_params = params.clone();
-                        vectorized_params[2].ty = vectorized_params[2].ty.simd_type()?;
+                    let mut vectorized_params = params.clone();
+                    vectorized_params[2].ty = vectorized_params[2].ty.simd_type()?;
 
-                        let vec_func = constructors::lambda_expr(vectorized_params, *vectorized_body)?;
+                    let vec_func = constructors::lambda_expr(vectorized_params, *vectorized_body)?;
+                    
+                    // Iterators for the vectorized loop.
+                    let mut data_names = Vec::new();
+                    let mut vec_iters = iters.clone()
+                        .iter_mut()
+                        .map(|i| {
+                            let mut i = i.clone();
+                            i.kind = IterKind::SimdIter;
+                            // If the data is a vector literal, replace it with an identity expression, and keep track of the name
+                            // so that we can generate a let expression for it later
+                            if let MakeVector { .. } = (*i.data).kind {
+                                let data = i.data.clone();
+                                let data_name = sym_gen.new_symbol("a");
+                                let data_ty = data.ty.clone();
+                                i.data = Box::new(constructors::ident_expr(data_name.clone(), data_ty).unwrap());
+                                data_names.push((*data, data_name));
+                            };
+                            i
+                        })
+                        .collect::<Vec<_>>();
 
-                        let data_names = iters
-                            .iter()
-                            .map(|_| sym_gen.new_symbol("a"))
-                            .collect::<Vec<_>>();
+                    // Iterators for the fringe loop. This is the same set of iterators, but with the
+                    // IteratorKind changed to Fringe.
+                    let fringe_iters = vec_iters
+                        .iter_mut()
+                        .map(|i| {
+                            let mut i = i.clone();
+                            i.kind = IterKind::FringeIter;
+                            i
+                        })
+                        .collect();
 
-                        // Iterators for the vectorized loop.
-                        let mut vec_iters = vec![];
-                        for (e, n) in iters.iter().zip(&data_names) {
-                            vec_iters.push(Iter {
-                                               data: Box::new(constructors::ident_expr(n.clone(), e.data.ty.clone())?),
-                                               start: e.start.clone(),
-                                               end: e.end.clone(),
-                                               stride: e.stride.clone(),
-                                               kind: IterKind::SimdIter,
-                                               shape: e.shape.clone(),
-                                               strides: e.strides.clone(),
-                                           });
-                        }
+                    let vectorized_loop = constructors::for_expr(vec_iters, *init_builder.clone(), vec_func, true)?;
+                    let scalar_loop = constructors::for_expr(fringe_iters, vectorized_loop, *func.clone(), false)?;
+                    let mut prev_expr = scalar_loop;
+                    for &(ref data, ref name) in data_names.iter() {
+                        prev_expr = constructors::let_expr(name.clone(), data.clone(), prev_expr)?;
+                    }
 
-                        // Iterators for the fringe loop. This is the same set of iterators, but with the
-                        // IteratorKind changed to Fringe.
-                        let fringe_iters = vec_iters
-                            .iter_mut()
-                            .map(|i| {
-                                     let mut i = i.clone();
-                                     i.kind = IterKind::FringeIter;
-                                     i
-                                 })
-                            .collect();
-
-                        let vectorized_loop = constructors::for_expr(vec_iters, *init_builder.clone(), vec_func, true)?;
-                        let scalar_loop = constructors::for_expr(fringe_iters, vectorized_loop, *func.clone(), false)?;
-                        let mut prev_expr = scalar_loop;
-                        for (iter, name) in iters.iter().zip(data_names).rev() {
-                            prev_expr = constructors::let_expr(name.clone(), *iter.data.clone(), prev_expr)?;
-                        }
-
-                        vectorized = true;
-                        return Ok((Some(prev_expr), false));
+                    vectorized = true;
+                    return Ok((Some(prev_expr), false));
                 }
             }
         }
@@ -119,18 +120,18 @@ pub fn predicate_merge_expr(e: &mut Expr) {
                                     Some(x) => {
                                         match *bk {
                                             BuilderKind::Merger(_, _)
-                                                | BuilderKind::VecMerger(_, _) => {
-                                                /* Change if(cond, merge(b, e), b) => 
+                                            | BuilderKind::VecMerger(_, _) => {
+                                                /* Change if(cond, merge(b, e), b) =>
                                                 merge(b, select(cond, e, identity). */
                                                 let expr = constructors::merge_expr(*builder.clone(),
                                                                              constructors::select_expr(
                                                                                  *cond.clone(),
                                                                                  *value.clone(), x)?)?;
                                                 return Ok((Some(expr), true));
-                                                
+
                                             },
                                             BuilderKind::DictMerger(_, _, _) => {
-                                                /* For dictmerger, need to match identity element 
+                                                /* For dictmerger, need to match identity element
                                                 back to the key. */
                                                 let sel_expr = make_select_for_kv(*cond.clone(),
                                                                                   *value.clone(),
@@ -346,11 +347,11 @@ fn vectorizable(for_loop: &Expr) -> Option<HashSet<Symbol>> {
                         check_arg_ty = true;
                     } else if let Struct(ref field_tys) = params[2].ty {
                         if field_tys
-                               .iter()
-                               .all(|t| match *t {
-                                        Scalar(_) => true,
-                                        _ => false,
-                                    }) {
+                            .iter()
+                            .all(|t| match *t {
+                                Scalar(_) => true,
+                                _ => false,
+                            }) {
                             check_arg_ty = true;
                         }
                     }
@@ -366,15 +367,15 @@ fn vectorizable(for_loop: &Expr) -> Option<HashSet<Symbol>> {
                     // broadcast them to vectorize them.
                     let mut passed = true;
                     body.traverse(&mut |e| match e.kind {
-                                           Ident(ref name) if !defined_in_loop.contains(name) => {
-                                               if let Scalar(_) = e.ty {
-                                                   idens.insert(name.clone());
-                                               } else {
-                                                   passed = false;
-                                               }
-                                           }
-                                           _ => {}
-                                       });
+                        Ident(ref name) if !defined_in_loop.contains(name) => {
+                            if let Scalar(_) = e.ty {
+                                idens.insert(name.clone());
+                            } else {
+                                passed = false;
+                            }
+                        }
+                        _ => {}
+                    });
 
                     if !passed {
                         trace!("Unsupported pattern: non-scalar identifier that must be broadcast");
@@ -456,8 +457,8 @@ fn make_select_for_kv(cond:  Expr,
 fn has_vectorized_merge(expr: &Expr) -> bool {
     let mut found = false;
     expr.traverse(&mut |ref e| if let Merge { ref value, .. } = e.kind {
-                           found |= value.ty.is_simd();
-                       });
+        found |= value.ty.is_simd();
+    });
     found
 }
 

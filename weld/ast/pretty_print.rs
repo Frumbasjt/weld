@@ -5,6 +5,7 @@
 
 use ast::*;
 use ast::ExprKind::*;
+use ast::ast::Type::Scalar;
 
 use util::join;
 
@@ -187,6 +188,10 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
             format!("broadcast({})", to_string_impl(e, config))
         }
 
+        SimdWidth(t) => {
+            format!("simdwidth({})", Scalar(t))
+        }
+
         CUDF { ref sym_name, ref args, ref return_ty } => {
             let args = join("(", ",", ")", args.iter().map(|e| to_string_impl(e, config)));
             format!("cudf[{},{}]{}", sym_name, return_ty, args)
@@ -206,6 +211,10 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
 
         ToVec { ref child_expr } => {
             format!("tovec({})", to_string_impl(child_expr, config))
+        }
+
+        Keys { ref child_expr } => {
+            format!("keys({})", to_string_impl(child_expr, config))
         }
 
         Let { ref name, ref value, ref body } => {
@@ -267,6 +276,15 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
                     to_string_impl(size, config))
         }
 
+        StrSlice {
+            ref data,
+            ref offset,
+        } => {
+            format!("strslice({},{})",
+                    to_string_impl(data, config),
+                    to_string_impl(offset, config))
+        }
+
         Sort { ref data, ref keyfunc } => {
             format!("sort({},{})",
                     to_string_impl(data, config),
@@ -289,10 +307,13 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
             res
         }
 
-        NewBuilder(ref arg) => {
-            match *arg {
-                Some(ref e) => format!("{}({})", expr.ty, to_string_impl(e, config)),
-                None => expr.ty.to_string(),
+        NewBuilder(ref args) => {
+            match args.len() {
+                0 => expr.ty.to_string(),
+                _ => {
+                    let args_str = join("(", ",", ")", args.iter().map(|e| to_string_impl(e, config)));
+                    format!("{}{}", expr.ty.to_string(), args_str)
+                }
             }
         }
 
@@ -316,6 +337,18 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
                     newline, less_indent_str);
             config.indent -= INDENT_LEVEL;
             res
+        }
+
+        SwitchFor { ref fors } => {
+            config.indent += INDENT_LEVEL;
+            let fors_str = fors.iter()
+                .map(|e| to_string_impl(e, config))
+                .collect::<Vec<String>>()
+                .join(&format!(",\n{}", indent_str));
+            format!("switchfor(\n{}{}\n{})",
+                    indent_str,
+                    fors_str,
+                    less_indent_str)
         }
 
         If { ref cond, ref on_true, ref on_false } => {
@@ -355,6 +388,13 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
             let params = params.iter().map(|e| to_string_impl(e, config));
             res.push_str(&join("(", ",", ")", params));
             res
+        }
+
+        BloomFilterContains {
+            ref bf, 
+            ref item
+        } => {
+            format!("bfcontains({},{})", to_string_impl(bf, config), to_string_impl(item, config))
         }
     };
     format!("{}{}", expr.annotations, expr_str)

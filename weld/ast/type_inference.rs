@@ -84,6 +84,17 @@ impl PushType for Type {
                     compile_err!("Type mismatch: expected {} but got {}", &other, self)
                 }
             }
+            // BloomFilter(ref elem) if *self == Unknown => {
+            //     *self = BloomFilter(elem.clone());
+            //     Ok(true)
+            // }
+            // BloomFilter(ref elem) => {
+            //     if let BloomFilter(ref mut dest) = *self {
+            //         dest.push_complete(elem.as_ref().clone())
+            //     } else {
+            //         compile_err!("Type mismatch: expected {} but got {}", &other, self)
+            //     }
+            // }
             _ => {
                 compile_err!("Type mismatch: expected {} but got {}", &other, self)
             }
@@ -111,6 +122,9 @@ impl PushType for Type {
                 Ok(false)
             }
             (&mut Vector(ref mut elem), &Vector(ref other_elem)) => {
+                elem.push(other_elem)
+            }
+            (&mut BloomFilter(ref mut elem), &BloomFilter(ref other_elem)) => {
                 elem.push(other_elem)
             }
             (&mut Dict(ref mut key, ref mut value), &Dict(ref other_key, ref other_value)) => {
@@ -144,6 +158,12 @@ impl PushType for Type {
                         elem.push(other_elem)
                     }
                     (
+                        &mut BloomBuilder(ref mut elem),
+                        &BloomBuilder(ref other_elem)
+                    ) => {
+                        elem.push(other_elem)
+                    }
+                    (
                         &mut DictMerger(ref mut key, ref mut value, ref mut op),
                         &DictMerger(ref other_key, ref other_value, ref other_op)
                     ) if *op == *other_op => {
@@ -172,7 +192,7 @@ impl PushType for Type {
                     // compiler will throw an error if we add new types.
                     (&mut Appender(_), _) | (&mut DictMerger(_,_,_), _) |
                         (&mut GroupMerger(_,_), _) | (&mut VecMerger(_,_), _) |
-                        (&mut Merger(_,_), _) => {
+                        (&mut Merger(_,_), _) | (&mut BloomBuilder(_), _) => {
                             compile_err!("Type mismatch: expected builder type {}", other)
                         }
                 }?;
@@ -222,9 +242,16 @@ trait InferTypesInternal {
 impl InferTypesInternal for Expr {
     /// Internal implementation of type inference.
     fn infer_types_internal(&mut self) -> WeldResult<()> {
+        // First get the types of global variables
+        let mut env = TypeMap::default();
+        for (sym, value) in self.annotations.run_vars().iter_mut() {
+            value.infer_up(&mut env)?;
+            if let Some(_) = env.insert(sym.clone(), value.ty.clone()) {
+                return compile_err!("Runtime variable with name {} already defined!", sym.name);
+            }
+        }
         loop {
-            let ref mut env = TypeMap::default();
-            if !self.infer_up(env)? {
+            if !self.infer_up(&mut env)? {
                 if self.partially_typed() {
                     return compile_err!("Could not infer some types")
                 } else {
@@ -242,6 +269,12 @@ impl InferTypesInternal for Expr {
     fn infer_up(&mut self, env: &mut TypeMap) -> WeldResult<bool> {
         // Remember whether we inferred any new type.
         let mut changed = false;
+
+        // Infer annotation types
+        for annot_expr in self.annotations.exprs_mut() {
+            changed |= annot_expr.infer_up(env)?;
+        }
+
         // Remember the old bindings so they can be restored.
         let mut old_bindings: Vec<Binding> = Vec::new();
         // Let and Lambda are the only expressions that change bindings.
@@ -318,6 +351,8 @@ impl InferTypesInternal for Expr {
             Literal(StringLiteral(_)) =>
                 self.ty.push_complete(Vector(Box::new(Scalar(I8)))),
 
+            SimdWidth(_) => self.ty.push_complete(Scalar(I64)),
+
             BinOp { kind: op, ref mut left, ref mut right } => {
                 // First, sync the left and right types into the elem_type.
                 let ref mut elem_type = Unknown;
@@ -386,6 +421,14 @@ impl InferTypesInternal for Expr {
                 } else {
                     Ok(changed)
                 }
+            }
+
+            Keys { ref mut child_expr } => {
+                let mut changed = false;
+                if let Dict(ref key_type, _) = child_expr.ty {
+                    changed |= self.ty.push(&Vector(key_type.clone()))?
+                };
+                Ok(changed)
             }
 
             Ident(ref symbol) => {
@@ -534,6 +577,21 @@ impl InferTypesInternal for Expr {
                 }
             }
 
+            StrSlice {
+                ref mut data,
+                ref mut offset,
+            } => {
+                if let Vector(_) = data.ty {
+                    let mut changed = false;
+                    changed |= offset.ty.push_complete(Scalar(I64))?;
+                    changed |= self.ty.push(&data.ty)?;
+                    Ok(changed)
+                } else {
+                    compile_err!("Internal error: StrSlice called on {}, must be called on vector",
+                            &data.ty)
+                }
+            }
+
             Sort { ref mut data, ref mut keyfunc } => {
                 if let Vector(ref elem_type) = data.ty {
                     let mut changed = sync_function(keyfunc, vec![&elem_type])?;
@@ -645,31 +703,57 @@ impl InferTypesInternal for Expr {
                 }
             }
 
-            NewBuilder(ref mut argument) => {
+            BloomFilterContains {
+                ref mut bf,
+                ref mut item
+            } => {
+                if let BloomFilter(ref ty) = bf.ty {
+                    let mut changed = false;
+                    changed |= item.ty.push(&ty)?;
+                    changed |= self.ty.push_complete(Scalar(Bool))?;
+                    Ok(changed)
+                } else if bf.ty == Unknown {
+                    Ok(false)
+                } else {
+                    compile_err!("Internal error: BloomFilterContains called on {:?}", bf.ty)
+                }
+            }
+
+            NewBuilder(ref mut arguments) => {
                 // NewBuilder is a special case where the expression can currently only be created
                 // via a type. If it doesn't have a type, throw a type inference error.
                 if let Builder(ref kind, _) = self.ty {
                     // Handle the builders that may take arguments.
                     match *kind {
                         VecMerger(ref elem, _) => {
-                            if let Some(ref mut argument) = argument {
-                                argument.ty.push(&Vector(elem.clone()))
+                            if arguments.len() > 0 {
+                                arguments[0].ty.push(&Vector(elem.clone()))
                             } else {
                                 compile_err!("Expected single vector argument in vecmerger")
                             }
                         }
                         Merger(ref elem, _) => {
-                            if let Some(ref mut argument) = argument {
-                                argument.ty.push(elem)
+                            if arguments.len() > 0 {
+                                arguments[0].ty.push(elem)
                             } else {
                                 Ok(false)
                             }
                         }
                         Appender(_) => {
-                            if let Some(ref mut argument) = argument {
-                                argument.ty.push(&Scalar(I64))
+                            if arguments.len() > 0 {
+                                arguments[0].ty.push(&Scalar(I64))
                             } else {
                                 Ok(false)
+                            }
+                        }
+                        BloomBuilder(_) => {
+                            match arguments.len() {
+                                1 => {
+                                    arguments[0].ty.push(&Scalar(I64))
+                                }
+                                _ => {
+                                    return compile_err!("Expected single argument in bloombuilder");
+                                }
                             }
                         }
                         _ => Ok(false)
@@ -714,6 +798,9 @@ impl InferTypesInternal for Expr {
                 // Set the builder kind type.
                 match kind {
                     Appender(ref mut elem) => {
+                        **elem = merge_type;
+                    }
+                    BloomBuilder(ref mut elem) => {
                         **elem = merge_type;
                     }
                     Merger(ref mut elem, _) => {
@@ -762,6 +849,26 @@ impl InferTypesInternal for Expr {
                 } else {
                     compile_err!("Expected builder type in result, got {}", &builder.ty)
                 }
+            }
+
+            SwitchFor { ref mut fors } => {
+                let mut changed = false;
+
+                // TODO: make sure all fors have proper builders/inputs
+
+                // Output must be of builder type
+                for func in fors {
+                    if let Lambda { ref mut body, .. } = func.kind {
+                        if let For { ref mut builder, .. } = body.kind {
+                            changed |= self.ty.push(&builder.ty)?;
+
+                            let func_type = Function(vec![Scalar(I64), Scalar(I64)], Box::new(builder.ty.clone()));
+                            changed |= func.ty.push(&func_type)?;
+                        }
+                    }
+                }
+
+                Ok(changed)
             }
 
             For { ref mut iters, ref mut builder, ref mut func } => {
@@ -860,6 +967,7 @@ fn infer_types_test() {
         kind: ExprKind::Ident(Symbol {
                                   name: "a".to_string(),
                                   id: 1,
+                                  global: false
                               }),
         ty: Type::Unknown,
         annotations: Annotations::new(),

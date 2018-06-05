@@ -28,6 +28,8 @@ pub enum Token {
     TIf,
     TIterate,
     TFor,
+    TSwitchFor,
+    TSimdWidth,
     TMerge,
     TResult,
     TLet,
@@ -55,6 +57,7 @@ pub enum Token {
     TLookup,
     TKeyExists,
     TSlice,
+    TStrSlice,
     TSort,
     TExp,
     TSin,
@@ -80,7 +83,9 @@ pub enum Token {
     TDictMerger,
     TGroupMerger,
     TVecMerger,
+    TBloomBuilder,
     TToVec,
+    TKeys,
     TOpenParen, // (
     TCloseParen, // )
     TOpenBracket, // [
@@ -113,6 +118,8 @@ pub enum Token {
     TMax,
     TMin,
     TPow,
+    TBloomFilter,
+    TBfContains,
     TEndOfInput,
 }
 
@@ -172,11 +179,11 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
 
         // Regular expressions for various types of tokens.
         static ref KEYWORD_RE: Regex = Regex::new(
-            "^(if|for|zip|len|lookup|keyexists|slice|sort|exp|sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|\
-             log|erf|sqrt|simd|select|broadcast|serialize|deserialize|\
+            "^(if|for|zip|len|lookup|keyexists|slice|strslice|sort|exp|sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|\
+             log|erf|sqrt|simd|select|broadcast|serialize|deserialize|switchfor|simdwidth|\
              iterate|cudf|simditer|fringeiter|rangeiter|nditer|iter|merge|result|let|true|false|macro|\
-             i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|vec|dict|appender|merger|vecmerger|\
-             dictmerger|groupmerger|tovec|min|max|pow)$").unwrap();
+             i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|vec|dict|appender|merger|vecmerger|bloombuilder|\
+             dictmerger|groupmerger|tovec|keys|min|max|pow|bloomfilter|bfcontains)$").unwrap();
 
         static ref COMMENT_RE: Regex = Regex::new("#.*$").unwrap();
         static ref STRLIT_RE: Regex = Regex::new(r#""[^"]*""#).unwrap();
@@ -186,8 +193,8 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
         static ref I8_BASE_2_RE: Regex = Regex::new(r"^0b[0-1]+[cC]$").unwrap();
         static ref I8_BASE_16_RE: Regex = Regex::new(r"^0x[0-9a-fA-F]+[cC]$").unwrap();
 
-	static ref I16_BASE_10_RE: Regex = Regex::new(r"[0-9]+si$").unwrap();
-	static ref I16_BASE_2_RE: Regex = Regex::new(r"^0b[0-1]+si$").unwrap();
+	    static ref I16_BASE_10_RE: Regex = Regex::new(r"[0-9]+si$").unwrap();
+	    static ref I16_BASE_2_RE: Regex = Regex::new(r"^0b[0-1]+si$").unwrap();
         static ref I16_BASE_16_RE: Regex = Regex::new(r"^0x[0-9a-fA-F]+si$").unwrap();
 
         static ref I32_BASE_10_RE: Regex = Regex::new(r"^[0-9]+$").unwrap();
@@ -219,6 +226,8 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
                             "iterate" => TIterate,
                             "let" => TLet,
                             "for" => TFor,
+                            "switchfor" => TSwitchFor,
+                            "simdwidth" => TSimdWidth,
                             "merge" => TMerge,
                             "result" => TResult,
                             "macro" => TMacro,
@@ -240,7 +249,9 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
                             "dictmerger" => TDictMerger,
                             "groupmerger" => TGroupMerger,
                             "vecmerger" => TVecMerger,
+                            "bloombuilder" => TBloomBuilder,
                             "tovec" => TToVec,
+                            "keys" => TKeys,
                             "zip" => TZip,
                             "iter" => TScalarIter,
                             "simditer" => TSimdIter,
@@ -251,6 +262,7 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
                             "lookup" => TLookup,
                             "keyexists" => TKeyExists,
                             "slice" => TSlice,
+                            "strslice" => TStrSlice,
                             "sort" => TSort,
                             "exp" => TExp,
                             "sin" => TSin,
@@ -276,6 +288,8 @@ pub fn tokenize(input: &str) -> WeldResult<Vec<Token>> {
                             "min" => TMin,
                             "max" => TMax,
                             "pow" => TPow,
+                            "bloomfilter" => TBloomFilter,
+                            "bfcontains" => TBfContains,
                             _ => return compile_err!("Invalid input token: {}", text),
                         });
         } else if STRLIT_RE.is_match(text) {
@@ -391,6 +405,8 @@ impl fmt::Display for Token {
                     TIf => "if",
                     TIterate => "iterate",
                     TFor => "for",
+                    TSwitchFor => "switchfor",
+                    TSimdWidth => "simdwidth",
                     TMerge => "merge",
                     TResult => "result",
                     TLet => "let",
@@ -413,7 +429,9 @@ impl fmt::Display for Token {
                     TDictMerger => "dictmerger",
                     TGroupMerger => "groupmerger",
                     TVecMerger => "vecmerger",
+                    TBloomBuilder => "bloombuilder",
                     TToVec => "tovec",
+                    TKeys => "keys",
                     TZip => "zip",
                     TScalarIter => "iter",
                     TSimdIter => "simditer",
@@ -424,6 +442,7 @@ impl fmt::Display for Token {
                     TLookup => "lookup",
                     TKeyExists => "keyexists",
                     TSlice => "slice",
+                    TStrSlice => "strslice",
                     TSort => "sort",
                     TExp => "exp",
                     TSin => "sin",
@@ -476,6 +495,8 @@ impl fmt::Display for Token {
                     TMin => "min",
                     TMax => "max",
                     TPow => "pow",
+                    TBloomFilter => "bloomfilter",
+                    TBfContains => "bfcontains",
                     TEndOfInput => "<END>",
                 })
             }
@@ -682,4 +703,18 @@ fn basic_tokenize() {
                     TIdent("x".into()),
                     TCloseParen,
                     TEndOfInput]);
+    assert_eq!(tokenize("switchfor(for(),for())").unwrap(),
+                vec![TSwitchFor,
+                     TOpenParen,
+                     TFor,
+                     TOpenParen,
+                     TCloseParen,
+                     TComma,
+                     TFor,
+                     TOpenParen,
+                     TCloseParen,
+                     TCloseParen,
+                     TEndOfInput]);
+    assert_eq!(tokenize("bloomfilter bfcontains").unwrap(),
+                vec![TBloomFilter, TBfContains, TEndOfInput]);
 }

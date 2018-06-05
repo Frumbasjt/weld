@@ -6,16 +6,44 @@
 #include <string.h>
 #include <pthread.h>
 #include <vector>
+#include <dtl/bloomfilter/blocked_bloomfilter_logic.hpp>
 
 // Weld dictionary interface.
 #include "dict.h"
 // Weld groupbuilder interface.
 #include "groupbuilder.h"
+// Weld bloomfilter interface.
+#include "bf.h"
+
+// flavor type
+struct flavor_t;
+
+// general profiling statistics for a task
+typedef struct profile_stats_t {
+  int64_t task_id;
+  uint32_t calls;
+  uint64_t tot_tuples;
+  uint64_t tot_cycles;
+  uint64_t prev_tuples;
+  uint64_t prev_cycles;
+  uint64_t start_cycle;
+  uint64_t end_cycle;
+} profile_stats_t;
+
+// statistics for the vw-greedy algorithm
+typedef struct vw_greedy_stats_t {
+  int32_t flavor;
+  int32_t explore_period;
+  int32_t explore_length;
+  int32_t exploit_period;
+  int32_t phase_end;
+  int32_t explore_start;
+} vw_greedy_stats_t;
 
 // work item
 struct work_t {
-  // parameters for the task function
-  void *data;
+  // task flavors
+  flavor_t *flavors;
   // [lower, upper) gives the range of iteration indices for this task
   // it is [0, 0) if the task is not a loop body
   int64_t lower;
@@ -52,8 +80,6 @@ struct work_t {
   // If task B must execute after task A, and tasks A and B have identical nest_idxs, B.task_id
   // is guaranteed to be larger than A.task_id.
   int64_t task_id;
-  // task function
-  void (*fp)(work_t*);
   // the continuation, NULL if no continuation
   work_t *cont;
   // if this task is a continuation, the number of remaining dependencies (0 otherwise)
@@ -64,9 +90,43 @@ struct work_t {
   // largest task size (in # of iterations) that we should not split further (defaults to 0
   // for non-loop body tasks)
   int32_t grain_size;
+  // number of function variants. 1 for regular tasks, higher for switchfor calls
+  int32_t flavor_count;
+  // some statistics for profiling
+  profile_stats_t *profile;
+  // some stastics specifically for the adaptive vw-greedy algorithm
+  vw_greedy_stats_t *vw_greedy;
 };
 
 typedef struct work_t work_t;
+
+// Weld parallel callback
+typedef void (*par_func_t)(work_t*, int32_t);
+
+typedef struct flavor_t {
+  // parameters for the task function
+  void *data;
+  // pointer to the function
+  par_func_t fp;
+  // id of the function (needed for lazy compilation)
+  int32_t func_id;
+  // the globals that are updated after the flavor is run (if instrumented)
+  void **instrumented_globals;
+  // the number of globals that are updated. 0 means this is not an instrumented flavor.
+  int32_t instrumented_globals_count;
+  // the ids of defered assignments the flavor depends on, if any.
+  int32_t *if_initialized;
+  // the number of defered assignments the flavor depends on.
+  int32_t if_initialized_count;
+  // whether the function is currently being compiled (in case of lazy compilation)
+  bool compiling;
+  // number of times this flavor was called
+  int32_t calls;
+  // number of call when this flavor was last called
+  int32_t last_called;
+  // average cost of this flavor in cycles
+  double avg_cost;
+} flavor_t;
 
 // VecBuilder structures
 struct vec_piece {
@@ -102,8 +162,10 @@ extern "C" {
   int32_t weld_rt_get_nworkers();
   int64_t weld_rt_get_run_id();
 
-  void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, void (*body)(work_t*),
-    void (*cont)(work_t*), int64_t lower, int64_t upper, int32_t grain_size);
+  void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, par_func_t body,
+    par_func_t cont, int64_t lower, int64_t upper, int32_t grain_size);
+  void weld_rt_start_switch(work_t *w, flavor_t *flavors, void *cont_data, par_func_t cont,
+    int64_t lower, int64_t upper, int32_t grain_size, int32_t flavor_count);
   void weld_rt_set_result(void *res);
 
   void *weld_rt_new_vb(int64_t elem_size, int64_t starting_cap, int32_t fixed_size);
@@ -116,9 +178,17 @@ extern "C" {
   void *weld_rt_get_merger_at_index(void *m, int64_t size, int32_t i);
   void weld_rt_free_merger(void *m);
 
+  void weld_rt_defer_build(int32_t id, void (*condition)(bool*), par_func_t build, 
+    void *build_params, void** depends_on);
+  void *weld_rt_get_defered_result(int32_t id);
+  void weld_rt_set_defered_result(int32_t id, void* result);
+
+  par_func_t weld_rt_compile_func(void *module, int32_t func_id);
+
   // weld_run functions can be called both from a runtime thread and before/after a Weld computation is
   // executed
-  int64_t weld_run_begin(void (*run)(work_t*), void* data, int64_t mem_limit, int32_t n_workers);
+  int64_t weld_run_begin(par_func_t run, void* data, int64_t mem_limit, int32_t n_workers, void *module,
+    int32_t explore_period, int32_t explore_length, int32_t exploit_period);
   void *weld_run_get_result(int64_t run_id);
   void weld_run_dispose(int64_t run_id);
 

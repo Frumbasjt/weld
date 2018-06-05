@@ -23,6 +23,7 @@ llvm-sys = "60.0.3"
 fnv = "1.0.5"
 clap = "2.31.1"
 code_builder = "0.1.0"
+failure = "*"
 
 [lib]
 path = "weld/lib.rs"
@@ -33,7 +34,6 @@ bench = false
 name = "repl"
 path = "weld/bin/repl.rs"
 bench = false
-
 
 [[bin]]
 name = "hdrgen"

@@ -88,6 +88,17 @@ extern "C" void weld_rt_dict_finalize(void *d);
  */
 extern "C" void *weld_rt_dict_to_array(void *d, int32_t value_offset, int32_t struct_size);
 
+/** Return an array of keys. This allocates memory that can be freed with `weld_run_free`.
+ *
+ * @param d the dictionary.
+ * 
+ * @return a continguous array of keys. The number of keys created can be retrieved using
+ * `weld_rt_dict_size`.
+ *
+ * PRE-REQUISITES: The dictionary must be finalized.
+ */
+extern "C" void *weld_rt_dict_keys_to_array(void *d);
+
 /** Returns the size of the dictionary.
  *
  * PRE-REQUISITES: The dictionary must be finalized.

@@ -26,6 +26,7 @@ use ast::BuilderKind::*;
 use error::*;
 use syntax;
 use runtime;
+use runtime::link::work_t;
 use sir;
 use sir::*;
 use sir::Statement;
@@ -36,6 +37,7 @@ use util::IdGenerator;
 use annotation::*;
 use conf::ParsedConf;
 use util::stats::CompilationStats;
+use sir::SwitchFlavorCondition::*;
 
 #[cfg(test)]
 use syntax::parser::*;
@@ -59,6 +61,7 @@ const WELD_INLINE_LIB: &'static [u8] = include_bytes!("../../../weld_rt/cpp/inli
 /// The default grain size for the parallel runtime.
 static DEFAULT_INNER_GRAIN_SIZE: i32 = 16384;
 static DEFAULT_OUTER_GRAIN_SIZE: i32 = 4096;
+static DEFAULT_SWITCH_GRAIN_SIZE: i32 = 4096;
 
 /// A wrapper for a struct passed as input to the Weld runtime.
 #[derive(Clone, Debug)]
@@ -67,6 +70,10 @@ pub struct WeldInputArgs {
     pub input: i64,
     pub nworkers: i32,
     pub mem_limit: i64,
+    pub module: i64,
+    pub explore_period: i32,
+    pub explore_length: i32,
+    pub exploit_period: i32,
 }
 
 /// A wrapper for outputs passed out of the Weld runtime.
@@ -84,6 +91,9 @@ pub struct CompiledModule {
     llvm_module: easy_ll::CompiledModule,
     param_types: Vec<Type>,
     return_type: Type,
+    sir_program: SirProgram,
+    conf: ParsedConf,
+    llvm_generator: LlvmGenerator,
 }
 
 impl CompiledModule {
@@ -106,10 +116,11 @@ impl CompiledModule {
 pub fn apply_opt_passes(expr: &mut Expr,
                         opt_passes: &Vec<Pass>,
                         stats: &mut CompilationStats,
-                        use_experimental: bool) -> WeldResult<()> {
+                        use_experimental: bool,
+                        use_adaptive: bool) -> WeldResult<()> {
     for pass in opt_passes {
         let start = PreciseTime::now();
-        pass.transform(expr, use_experimental)?;
+        let changed = pass.transform(expr, use_experimental, use_adaptive)?;
         let end = PreciseTime::now();
         stats.pass_times.push((pass.pass_name(), start.to(end)));
         debug!("After {} pass:\n{}", pass.pass_name(), expr.pretty_print());
@@ -132,6 +143,7 @@ impl HasPointer for Type {
             Builder(_, _) => true,
             Struct(ref tys) => tys.iter().any(|ref t| t.has_pointer()),
             Function(_, _) => true,
+            BloomFilter(_) => true,
             Unknown => false,
         }
     }
@@ -155,7 +167,7 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     debug!("After type inference:\n{}\n", expr.pretty_print());
     stats.weld_times.push(("Type Inference".to_string(), start.to(end)));
 
-    apply_opt_passes(&mut expr, &conf.optimization_passes, stats, conf.enable_experimental_passes)?;
+    apply_opt_passes(&mut expr, &conf.optimization_passes, stats, conf.enable_experimental_passes, conf.enable_adaptive_passes)?;
 
     let start = PreciseTime::now();
     expr.uniquify()?;
@@ -167,7 +179,7 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     debug!("Optimized Weld program:\n{}\n", expr.pretty_print());
 
     let start = PreciseTime::now();
-    let mut sir_prog = sir::ast_to_sir(&expr, conf.support_multithread)?;
+    let mut sir_prog = sir::ast_to_sir(&expr, conf.support_multithread, conf.lazy_compilation)?;
     let end = PreciseTime::now();
     debug!("SIR program:\n{}\n", &sir_prog);
     stats.weld_times.push(("AST to SIR".to_string(), start.to(end)));
@@ -203,7 +215,7 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     trace!("LLVM program:\n{}\n", &llvm_code);
     stats.weld_times.push(("LLVM Codegen".to_string(), start.to(end)));
 
-    let ref timestamp = format!("{}", time::now().to_timespec().sec);
+    let ref timestamp = format!("{}", time::now().to_timespec().nsec);
 
     // Dump files if needed. Do this here in case the actual LLVM code gen fails.
     if conf.dump_code.enabled {
@@ -214,7 +226,7 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     }
 
     debug!("Started compiling LLVM");
-    let compiled = try!(easy_ll::compile_module(
+    let compiled = try!(easy_ll::compile_init_module(
         &llvm_code,
         conf.llvm_optimization_level,
         conf.dump_code.enabled,
@@ -252,10 +264,42 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
             llvm_module: module,
             param_types: param_tys.clone(),
             return_type: *return_ty.clone(),
+            sir_program: sir_prog,
+            conf: conf.clone(),
+            llvm_generator: gen,
         })
     } else {
         unreachable!();
     }
+}
+
+pub fn compile_lazy_function(compiled: &mut CompiledModule, func_id: FunctionId) -> WeldResult<(extern "C" fn(*mut work_t) -> ())> {
+    let ref timestamp = format!("{}", time::now().to_timespec().sec);
+
+    compiled.llvm_generator.body_code = CodeBuilder::new();
+    compiled.llvm_generator.add_lazy_function_callback(&compiled.sir_program, func_id)?;
+    let llvm_code = compiled.llvm_generator.result();
+
+    if compiled.conf.dump_code.enabled {
+        write_code(&llvm_code, "ll", format!("{}-f{}", timestamp, func_id).as_ref(), &compiled.conf.dump_code.dir)
+    }
+
+    let (func, code) = try!(easy_ll::compile_and_add_to_module::<*mut work_t, ()>(
+                            &compiled.llvm_module,
+                            &llvm_code,
+                            &format!("f{}_par", func_id),
+                            compiled.conf.llvm_optimization_level,
+                            compiled.conf.dump_code.enabled,
+                            Some(WELD_INLINE_LIB)));
+
+    if compiled.conf.dump_code.enabled {
+        let llvm_op_code = code.unwrap();
+        // Write the optimized LLVM code and assembly.
+        write_code(&llvm_op_code.optimized_llvm, "ll", format!("{}-f{}-opt", timestamp, func_id).as_ref(), &compiled.conf.dump_code.dir);
+        write_code(&llvm_op_code.assembly, "S", format!("{}-f{}-opt", timestamp, func_id).as_ref(), &compiled.conf.dump_code.dir);
+    }
+
+    Ok(func)
 }
 
 /// Writes code to a file specified by `PathBuf`. Writes a log message if it failed.
@@ -271,12 +315,12 @@ fn write_code(code: &str, ext: &str, timestamp: &str, dir_path: &PathBuf) {
     let ref path_str = format!("{}", path.display());
     match options.open(path) {
         Ok(ref mut file) => {
-            if let Err(_) = file.write_all(code.as_bytes()) {
-                error!("Write failed: could not write code to file {}", path_str);
+            if let Err(m) = file.write_all(code.as_bytes()) {
+                error!("Write failed: could not write code to file {} ({})", path_str, m);
             }
         }
-        Err(_) => {
-            error!("Open failed: could not write code to file {}", path_str);
+        Err(m) => {
+            error!("Open failed: could not write code to file {} ({})", path_str, m);
         }
     }
 }
@@ -319,6 +363,10 @@ pub struct LlvmGenerator {
     /// LLVM type name of the form %d0, %d1, etc for each dict generated.
     dict_names: fnv::FnvHashMap<Type, String>,
     dict_ids: IdGenerator,
+
+    /// LLVM type names for each bloom filter type.
+    bloom_filter_names: fnv::FnvHashMap<Type, String>,
+    bloom_filter_ids: IdGenerator,
 
     /// Set of declared CUDFs.
     cudf_names: HashSet<String>,
@@ -367,6 +415,8 @@ impl LlvmGenerator {
             merger_ids: IdGenerator::new("%m"),
             dict_names: fnv::FnvHashMap::default(),
             dict_ids: IdGenerator::new("%d"),
+            bloom_filter_names: fnv::FnvHashMap::default(),
+            bloom_filter_ids: IdGenerator::new("%bf"),
             serialize_fns: fnv::FnvHashMap::default(),
             deserialize_fns: fnv::FnvHashMap::default(),
             cudf_names: HashSet::new(),
@@ -385,6 +435,36 @@ impl LlvmGenerator {
         generator
     }
 
+    /// Returns a new generator with the same prelude, but a clean body.
+    pub fn from(generator: LlvmGenerator) -> LlvmGenerator {
+        LlvmGenerator {
+            struct_names: generator.struct_names,
+            struct_ids: generator.struct_ids,
+            vec_names: generator.vec_names,
+            vec_ids: generator.vec_ids,
+            growable_vec_names: generator.growable_vec_names,
+            keyfunc_ids: generator.keyfunc_ids,
+            merger_names: generator.merger_names,
+            merger_ids: generator.merger_ids,
+            dict_names: generator.dict_names,
+            dict_ids: generator.dict_ids,
+            bloom_filter_names: generator.bloom_filter_names,
+            bloom_filter_ids: generator.bloom_filter_ids,
+            serialize_fns: generator.serialize_fns,
+            deserialize_fns: generator.deserialize_fns,
+            cudf_names: generator.cudf_names,
+            bld_names: generator.bld_names,
+            string_names: generator.string_names,
+            prelude_code: generator.prelude_code,
+            prelude_var_ids: generator.prelude_var_ids,
+            body_code: CodeBuilder::new(),
+            visited: generator.visited,
+            type_helpers: generator.type_helpers,
+            multithreaded: generator.multithreaded,
+            trace_run: generator.trace_run
+        }
+    }
+
     /// Return all the code generated so far.
     pub fn result(&mut self) -> String {
         format!("; PRELUDE:\n\n{}\n; BODY:\n\n{}", self.prelude_code.result(), self.body_code.result())
@@ -395,6 +475,58 @@ impl LlvmGenerator {
     // Helpers for Function Code Generation
     //
     *********************************************************************************************/
+
+    /// Given a LLVM type, generates the code to calculate the size of it. Returns a symbol
+    /// that holds the result.
+    fn gen_size_of(&mut self, ll_ty: &str, ctx: &mut FunctionContext) -> WeldResult<String> {
+        let size_ptr = ctx.var_ids.next();
+        let size = ctx.var_ids.next();
+        ctx.code.add(format!("{} = getelementptr {}, {}* null, i32 1", size_ptr, ll_ty, ll_ty));
+        ctx.code.add(format!("{} = ptrtoint {}* {} to i64", size, ll_ty, size_ptr));
+        Ok(size)
+    }
+
+    // Allocate space for an array of elements of some type. A 0 size returns a null.
+    fn gen_malloc_array(&mut self, ll_ty: &str, count: usize, ctx: &mut FunctionContext) -> WeldResult<String> {
+        if count > 0 {
+            let size = self.gen_size_of(ll_ty, ctx)?;
+            let malloc_size;
+            if count > 1 {
+                malloc_size = ctx.var_ids.next();
+                ctx.code.add(format!("{} = mul i64 {}, {}", malloc_size, size, count))
+            } else {
+                malloc_size = size;
+            }
+            let i8_ptr = ctx.var_ids.next();
+            let ty_ptr = ctx.var_ids.next();
+            ctx.code.add(format!("{} = call i8* @malloc(i64 {})", i8_ptr, malloc_size));
+            ctx.code.add(format!("{} = bitcast i8* {} to {}*", ty_ptr, i8_ptr, ll_ty));
+            Ok(ty_ptr)
+        } else {
+            Ok("null".to_string())
+        }
+    }
+
+    // Allocate space for an array of elements of some type, zero-initialized. A 0 size returns a null.
+    fn gen_calloc_array(&mut self, ll_ty: &str, count: usize, ctx: &mut FunctionContext) -> WeldResult<String> {
+        if count > 0 {
+            let size = self.gen_size_of(ll_ty, ctx)?;
+            let i8_ptr = ctx.var_ids.next();
+            let ty_ptr = ctx.var_ids.next();
+            ctx.code.add(format!("{} = call i8* @calloc(i64 {}, i64 {})", i8_ptr, count, size));
+            ctx.code.add(format!("{} = bitcast i8* {} to {}*", ty_ptr, i8_ptr, ll_ty));
+            Ok(ty_ptr)
+        } else {
+            Ok("null".to_string())
+        }
+    }
+
+    // Insert an element in an array.
+    fn gen_insert_array_element(&mut self, array: &str, element: &str, ll_ty: &str, idx: usize, ctx: &mut FunctionContext) {
+        let ptr = ctx.var_ids.next();
+        ctx.code.add(format!("{} = getelementptr {}, {}* {}, i32 {}", ptr, ll_ty, ll_ty, array, idx));
+        ctx.code.add(format!("store {} {}, {}* {}", ll_ty, element, ll_ty, ptr));
+    }
 
     /// Given a set of parameters and a suffix, returns a string used to represent LLVM function
     /// arguments. Each argument has the given suffix. Argument names are sorted by their symbol
@@ -431,21 +563,33 @@ impl LlvmGenerator {
     }
 
     /// Generates code to unpack a struct containing a set of arguments with the given symbols and
-    /// types. The order of arguments is assumed to be sorted by the symbol name.
-    fn gen_unload_arg_struct(&mut self, params_sorted: &BTreeMap<Symbol, Type>, suffix: &str, ctx: &mut FunctionContext) -> WeldResult<()> {
+    /// types. The order of arguments is assumed to be sorted by the symbol name. Flavor index
+    /// points is typically 0, except for switchfor variations.
+    fn gen_unload_arg_struct(&mut self, 
+                             params_sorted: &BTreeMap<Symbol, Type>, 
+                             suffix: &str, 
+                             flavor_idx: usize, 
+                             ctx: &mut FunctionContext) -> WeldResult<()> {
+
         let ref struct_ty = Struct(params_sorted.values().map(|e| e.clone()).collect());
         let arg_struct_ll_ty = self.llvm_type(struct_ty)?;
         let storage_ptr = ctx.var_ids.next();
+        let flavors_ptr = ctx.var_ids.next();
+        let flavors = ctx.var_ids.next();
+        let flavor_ptr = ctx.var_ids.next();
         let work_data_ptr = ctx.var_ids.next();
         let work_data = ctx.var_ids.next();
-        ctx.code.add(format!("{} = getelementptr inbounds %work_t, %work_t* %cur.work, i32 0, i32 0", work_data_ptr));
+        ctx.code.add(format!("{} = getelementptr inbounds %work_t, %work_t* %cur.work, i32 0, i32 0", flavors_ptr));
+        ctx.code.add(format!("{} = load %flavor_t*, %flavor_t** {}", flavors, flavors_ptr));
+        ctx.code.add(format!("{} = getelementptr inbounds %flavor_t, %flavor_t* {}, i32 %flavor", flavor_ptr, flavors));
+        ctx.code.add(format!("{} = getelementptr inbounds %flavor_t, %flavor_t* {}, i32 0, i32 0", work_data_ptr, flavor_ptr));
         ctx.code.add(format!("{} = load i8*, i8** {}", work_data, work_data_ptr));
         ctx.code.add(format!("{} = bitcast i8* {} to {}*", storage_ptr, work_data, arg_struct_ll_ty));
         for (i, (arg, ty)) in params_sorted.iter().enumerate() {
             let ptr_tmp = ctx.var_ids.next();
             let arg_ll_ty = self.llvm_type(ty)?;
             ctx.code.add(format!("{} = getelementptr inbounds {}, {}* {}, i32 0, i32 {}",
-                ptr_tmp, arg_struct_ll_ty, arg_struct_ll_ty, storage_ptr, i));
+                                 ptr_tmp, arg_struct_ll_ty, arg_struct_ll_ty, storage_ptr, i));
             ctx.code.add(format!("{}{} = load {}, {}* {}", llvm_symbol(arg), suffix, arg_ll_ty, arg_ll_ty, ptr_tmp));
         }
         Ok(())
@@ -814,7 +958,7 @@ impl LlvmGenerator {
     }
 
     /// Generates code which, given the arguments with symbols and types, creates a struct with the
-    /// arguments. The order of the strut elements is sorted by the symbol names. Returns the LLVM
+    /// arguments. The order of the struct elements is sorted by the symbol names. Returns the LLVM
     /// name of the i8* pointer pointing to the created struct.
     fn gen_create_arg_struct(&mut self, params_sorted: &BTreeMap<Symbol, Type>, suffix: &str, ctx: &mut FunctionContext) -> WeldResult<String> {
         let mut prev_ref = String::from("undef");
@@ -1147,17 +1291,18 @@ impl LlvmGenerator {
         self.gen_load_args(&sir.funcs[par_for.cont].params, ".ac", ".ptr", &mut ctx)?;
         let body_struct = self.gen_create_arg_struct(&func.params, ".ab", ctx)?;
         let cont_struct = self.gen_create_arg_struct(&sir.funcs[par_for.cont].params, ".ac", ctx)?;
+
         ctx.code.add(format!(
-                "call void @weld_rt_start_loop(%work_t* %cur.work, i8* {}, i8* {}, \
-                                void (%work_t*)* @f{}_par, void (%work_t*)* @f{}_par, i64 0, \
-                                i64 {}, i32 {})",
-                                body_struct,
-                                cont_struct,
-                                func.id,
-                                par_for.cont,
-                                num_iters_str,
-                                grain_size
-                                ));
+            "call void @weld_rt_start_loop(%work_t* %cur.work, i8* {}, i8* {}, \
+                            void (%work_t*, i32)* @f{}_par, void (%work_t*, i32)* @f{}_par, i64 0, \
+                            i64 {}, i32 {})",
+                            body_struct,
+                            cont_struct,
+                            func.id,
+                            par_for.cont,
+                            num_iters_str,
+                            grain_size
+        ));
         Ok(())
     } 
 
@@ -1573,15 +1718,24 @@ impl LlvmGenerator {
                                  sir: &SirProgram,
                                  func: &SirFunction) -> WeldResult<()> {
         let ref mut ctx = FunctionContext::new(false);
-        let combined_params = get_combined_params(sir, &par_for);
+        let combined_params = get_combined_params(&vec![&sir.funcs[par_for.body], &sir.funcs[par_for.cont]]);
         let serial_arg_types = self.get_arg_str(&combined_params, "")?;
         self.gen_store_args(&combined_params, "", ".ptr", ctx)?;
         // Compute the number of iterations and the start point of a fringe iter if there is one.
         let (num_iters_str, fringe_start_str) = self.gen_num_iters_and_fringe_start(&par_for, func, ctx)?;
         // Check if the loops are in-bounds and throw an error if they are not.
         self.gen_loop_bounds_check(fringe_start_str, &num_iters_str, &par_for, func, ctx)?;
-        // Invoke the loop body (either by directly calling a function or starting the runtime).
-        self.gen_invoke_loop_body(&num_iters_str, &par_for, sir, func, ctx)?;
+
+        if !par_for.switched {
+            // Invoke the loop body (either by directly calling a function or starting the runtime).
+            self.gen_invoke_loop_body(&num_iters_str, &par_for, sir, func, ctx)?;
+        } else {
+            // Invoke the loop body directly
+            let body_arg_types = self.get_arg_str(&func.params, "")?;
+            ctx.code.add(format!("call void @f{}({}, i64 0, i64 {}, i32 %cur.tid)", func.id, body_arg_types, num_iters_str));
+            let cont_arg_types = self.get_arg_str(&sir.funcs[par_for.cont].params, "")?;
+            ctx.code.add(format!("call void @f{}({}, i32 %cur.tid)", par_for.cont, cont_arg_types));
+        }
 
         ctx.code.add(format!("br label %fn.end"));
         ctx.code.add("fn.end:");
@@ -1595,12 +1749,41 @@ impl LlvmGenerator {
         Ok(())
     }
 
+    /// Generates a wrapper function for a for loop if it is one of the entries of a switchfor.
+    /// Differs from regular wrapper functions in that it does not need to compute the number of
+    /// iters, and for loops are always invoked without the runtime.
+    fn gen_switch_entry_loop_wrapper_function(&mut self,
+                                 par_for: &ParallelForData,
+                                 sir: &SirProgram,
+                                 func: &SirFunction) -> WeldResult<()> {
+
+        let ref mut ctx = FunctionContext::new(false);
+        let combined_params = get_combined_params(&vec![&sir.funcs[par_for.body], &sir.funcs[par_for.cont]]);
+        let serial_arg_types = self.get_arg_str(&combined_params, "")?;
+        self.gen_store_args(&combined_params, "", ".ptr", ctx)?;
+        // Invoke the loop body directly
+        let body_arg_types = self.get_arg_str(&func.params, "")?;
+        ctx.code.add(format!("call void @f{}({}, i64 %lower.idx, i64 %upper.idx, i32 %cur.tid)", func.id, body_arg_types));
+        let cont_arg_types = self.get_arg_str(&sir.funcs[par_for.cont].params, "")?;
+        ctx.code.add(format!("call void @f{}({}, i32 %cur.tid)", par_for.cont, cont_arg_types));
+        ctx.code.add(format!("br label %fn.end"));
+        ctx.code.add("fn.end:");
+        ctx.code.add("ret void");
+        ctx.code.add("}\n\n");
+        self.body_code.add(format!("define void @f{}_wrapper({}, i64 %lower.idx, i64 %upper.idx, i32 %cur.tid) {{", func.id, serial_arg_types));
+        self.body_code.add(format!("fn.entry:"));
+        self.body_code.add(&ctx.alloca_code.result());
+        self.body_code.add(&ctx.code.result());
+
+        Ok(())
+    }
+
     /// Generates the parallel runtime callback function for a loop body. This function calls the
     /// function which executes a loop body after unpacking the lower and upper bound from the work
     /// item.
-    fn gen_parallel_runtime_callback_function(&mut self, func: &SirFunction) -> WeldResult<()> {
+    fn gen_parallel_runtime_callback_function(&mut self, func: &SirFunction, flavor_idx: usize) -> WeldResult<()> {
             let mut ctx = &mut FunctionContext::new(false);
-            self.gen_unload_arg_struct(&func.params, ".load", &mut ctx)?;
+            self.gen_unload_arg_struct(&func.params, ".load", flavor_idx, &mut ctx)?;
             self.gen_store_args(&func.params, ".load", "", &mut ctx)?;
             self.gen_create_stack_mergers(&func.params, &mut ctx)?;
             let lower_bound_ptr = ctx.var_ids.next();
@@ -1624,37 +1807,225 @@ impl LlvmGenerator {
             self.gen_store_stack_mergers(&func.params, &mut ctx)?;
             ctx.code.add("ret void");
             ctx.code.add("}\n\n");
-            self.body_code.add(format!("define void @f{}_par(%work_t* %cur.work) {{", func.id));
+            self.body_code.add(format!("define void @f{}_par(%work_t* %cur.work, i32 %flavor) {{", func.id));
+            self.body_code.add(format!("; flavor index: {}", flavor_idx));
             self.body_code.add("entry:");
             self.body_code.add(&ctx.alloca_code.result());
             self.body_code.add(&ctx.code.result());
             Ok(())
     }
 
-    /// Generates the continuation function of the given parallel loop.
+    /// Generates the continuation function for some parallel loop or switch.
     fn gen_loop_continuation_function(&mut self,
-                                      par_for: &ParallelForData,
-                                      sir: &SirProgram) -> WeldResult<()> {
-            let mut ctx = &mut FunctionContext::new(false);
+                                      func: &SirFunction) -> WeldResult<()> {
+        let mut ctx = &mut FunctionContext::new(false);
 
-            ctx.code.add(format!("%cur.tid = call i32 @weld_rt_thread_id()"));
-            self.gen_unload_arg_struct(&sir.funcs[par_for.cont].params, ".load", &mut ctx)?;
-            self.gen_store_args(&sir.funcs[par_for.cont].params, ".load", "", &mut ctx)?;
-            self.gen_create_stack_mergers(&sir.funcs[par_for.cont].params, &mut ctx)?;
-            self.gen_load_args(&sir.funcs[par_for.cont].params, ".arg", "", &mut ctx)?;
-            self.gen_create_new_vb_pieces(&sir.funcs[par_for.cont].params, ".arg", &mut ctx)?;
+        ctx.code.add(format!("%cur.tid = call i32 @weld_rt_thread_id()"));
+        self.gen_unload_arg_struct(&func.params, ".load", 0, &mut ctx)?;
+        self.gen_store_args(&func.params, ".load", "", &mut ctx)?;
+        self.gen_create_stack_mergers(&func.params, &mut ctx)?;
+        self.gen_load_args(&func.params, ".arg", "", &mut ctx)?;
+        self.gen_create_new_vb_pieces(&func.params, ".arg", &mut ctx)?;
 
-            ctx.code.add("fn_call:");
-            let cont_arg_types = self.get_arg_str(&sir.funcs[par_for.cont].params, ".arg")?;
-            ctx.code.add(format!("call void @f{}({}, i32 %cur.tid)", par_for.cont, cont_arg_types));
-            self.gen_store_stack_mergers(&sir.funcs[par_for.cont].params, &mut ctx)?;
-            ctx.code.add("ret void");
-            ctx.code.add("}\n\n");
-            self.body_code.add(format!("define void @f{}_par(%work_t* %cur.work) {{", par_for.cont));
-            self.body_code.add("entry:");
-            self.body_code.add(&ctx.alloca_code.result());
-            self.body_code.add(&ctx.code.result());
-            Ok(())
+        ctx.code.add("fn_call:");
+        let cont_arg_types = self.get_arg_str(&func.params, ".arg")?;
+        ctx.code.add(format!("call void @f{}({}, i32 %cur.tid)", func.id, cont_arg_types));
+        self.gen_store_stack_mergers(&func.params, &mut ctx)?;
+        ctx.code.add("ret void");
+        ctx.code.add("}\n\n");
+        self.body_code.add(format!("define void @f{}_par(%work_t* %cur.work, i32 %flavor) {{", func.id));
+        self.body_code.add("entry:");
+        self.body_code.add(&ctx.alloca_code.result());
+        self.body_code.add(&ctx.code.result());
+        Ok(())
+    }
+
+    pub fn gen_switch_for_functions(&mut self,
+                                    switch_for: &SwitchForData,
+                                    sir: &SirProgram) -> WeldResult<String> {
+
+        let mut flavor_idx = 0;
+        for flavor in switch_for.flavors.iter() {
+            let func = &sir.funcs[flavor.for_func];
+
+            if !func.is_lazy() && self.visited.insert(func.id) {
+                self.gen_switch_for_flavor(func, flavor, flavor_idx, sir)?;
+            }
+            flavor_idx += 1;
+        }
+        let switch_function_name = self.gen_switch_function(switch_for, sir)?;
+        self.gen_loop_continuation_function(&sir.funcs[switch_for.cont])?;
+
+        Ok(switch_function_name)
+    }
+
+    fn gen_switch_for_flavor(&mut self, 
+                             func: &SirFunction, 
+                             flavor: &SwitchFlavorData, 
+                             flavor_idx: usize,
+                             sir: &SirProgram) -> WeldResult<()> {
+
+        let ctx = &mut FunctionContext::new(false);
+        let mut arg_types = self.get_arg_str(&func.params, ".in")?;
+        // Add the lower and upper index to the standard function params.
+        arg_types.push_str(", i64 %lower.idx, i64 %upper.idx");
+
+        self.gen_function_header(&arg_types, func, ctx)?;
+        ctx.code.add(format!("store i64 %lower.idx, i64* {}", llvm_symbol(&flavor.lb_arg)));
+        ctx.code.add(format!("store i64 %upper.idx, i64* {}", llvm_symbol(&flavor.ub_arg)));
+        // Jump to block 0, which is where the loop body starts.
+        ctx.code.add(format!("br label %b.b{}", func.blocks[0].id));
+        // Generate an expression for the function body.
+        self.gen_function_body(sir, func, ctx)?;
+        ctx.code.add("body.end:");
+        ctx.code.add("ret void");
+        ctx.code.add("}\n\n");
+
+        self.body_code.add(&ctx.alloca_code.result());
+        self.body_code.add(&ctx.code.result());
+
+        // Generate the function that will be called by the runtime
+        self.gen_parallel_runtime_callback_function(func, flavor_idx)?;
+
+        Ok(())
+    }
+
+    /// Generates code which, for a SwitchFor, computes the number of iterations and checks the bounds
+    /// for the first For option, and assumes other Fors are equivalent. Then creates the arguments
+    /// for the runtime, and finally calls `weld_rt_start_switch`.
+    fn gen_switch_function(&mut self,
+                           switch_for: &SwitchForData,
+                           sir: &SirProgram) -> WeldResult<String> {
+
+        let mut ctx = &mut FunctionContext::new(false);
+        let grain_size = match switch_for.grain_size {
+            Some(size) => size,
+            None => DEFAULT_SWITCH_GRAIN_SIZE
+        };
+
+        // Get the combined params of all functions.
+        let funcs = &switch_for.flavors.iter().map(|fl|&sir.funcs[fl.for_func]).collect::<Vec<_>>();
+        let mut funcs_and_cont = funcs.clone();
+        funcs_and_cont.push(&sir.funcs[switch_for.cont]);
+        let combined_params = get_combined_params(&funcs_and_cont);
+        let serial_arg_types = self.get_arg_str(&combined_params, "")?;
+        self.gen_store_args(&combined_params, "", ".ptr", ctx)?;
+        // Base number of iterations and bounds check on the first for loop in the switch.
+        let par_for = &switch_for.flavors[0].for_data;
+        let body_func = &sir.funcs[par_for.body];
+        // Compute the number of iterations and the start point of a fringe iter if there is one.
+        let (num_iters_str, fringe_start_str) = self.gen_num_iters_and_fringe_start(par_for, body_func, ctx)?;
+
+        // Check if the loops are in-bounds and throw an error if they are not.
+        self.gen_loop_bounds_check(fringe_start_str, &num_iters_str, par_for, body_func, ctx)?;
+
+        // TODO: don't call runtime if less than certain size.
+
+        // Create arguments for runtime function
+        for func in funcs {
+            self.gen_create_global_mergers(&func.params, ".ptr", &mut ctx)?;
+        }
+        self.gen_create_global_mergers(&sir.funcs[switch_for.cont].params, ".ptr", &mut ctx)?;
+        for func in funcs {
+            self.gen_load_args(&func.params, &format!(".ab{}", func.id), ".ptr", &mut ctx)?;
+        }
+        self.gen_load_args(&sir.funcs[switch_for.cont].params, ".ac", ".ptr", &mut ctx)?;
+
+        // Create flavors
+        let flavors = self.gen_calloc_array("%flavor_t", funcs.len(), ctx)?;
+        let mut idx = 0;
+        for func in funcs {
+            // Store flavor data
+            let body_struct = self.gen_create_arg_struct(&func.params, &format!(".ab{}", func.id), ctx)?;
+            let data_ptr = ctx.var_ids.next();
+            ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i64 {}, i32 0", data_ptr, flavors, idx));
+            ctx.code.add(format!("store i8* {}, i8** {}", body_struct, data_ptr));
+            // Store flavor function and id (if lazy)
+            let fp_ptr = ctx.var_ids.next();
+            ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i64 {}, i32 1", fp_ptr, flavors, idx));
+            if !func.is_lazy() {
+                ctx.code.add(format!("store void (%work_t*, i32)* @f{}_par, void (%work_t*, i32)** {}", func.id, fp_ptr));
+            } else {
+                // ctx.code.add(format!("store void (%work_t*)* null, void (%work_t*)** {}", fp_ptr));
+                let fid_ptr = ctx.var_ids.next();
+                ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i64 {}, i32 2", fid_ptr, flavors, idx));
+                ctx.code.add(format!("store i32 {}, i32* {}", func.id, fid_ptr));
+            }
+            // Store flavor settings
+            for flav_cond in switch_for.flavors[idx].conditions.iter() {
+                match *flav_cond {
+                    Instrumented(ref flav_instrumented_globals) => {
+                        // Pass the instrumented globals array (if any)
+                        if flav_instrumented_globals.len() > 0 {
+                            let instr_globals_arr_ptr = ctx.var_ids.next();
+                            ctx.code.add(format!("{} = getelementptr inbounds %flavor_t, %flavor_t* {}, i64 {}, i32 {}", instr_globals_arr_ptr, flavors, idx, 3));
+                            let instr_globals_arr = self.gen_malloc_array("i8*", flav_instrumented_globals.len(), ctx)?;
+                            let mut j = 0;
+                            for &(ref global, ref ty) in flav_instrumented_globals.iter() {
+                                let i8_tmp = ctx.var_ids.next();
+                                ctx.code.add(format!("{} = bitcast {}* {} to i8*", i8_tmp, self.llvm_type(ty)?, llvm_symbol(global)));
+                                self.gen_insert_array_element(&instr_globals_arr, &i8_tmp, "i8*", j, ctx);
+                                j += 1;
+                            }
+                            ctx.code.add(format!("store i8** {}, i8*** {}", instr_globals_arr, instr_globals_arr_ptr));
+                            // Pass the number of instrumented globals
+                            let instr_globals_cnt_ptr = ctx.var_ids.next();
+                            ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i32 {}, i32 {}", instr_globals_cnt_ptr, flavors, idx, 4));
+                            ctx.code.add(format!("store i32 {}, i32* {}", flav_instrumented_globals.len(), instr_globals_cnt_ptr));
+                        }
+                    },
+                    IfInitialized(ref flav_if_init_defered_ids) => {
+                        // Pass the ids of defered assignments the flavor depends on (if any)
+                        if flav_if_init_defered_ids.len() > 0 {
+                            let if_init_arr_ptr = ctx.var_ids.next();
+                            ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i32 {}, i32 {}", if_init_arr_ptr, flavors, idx, 5));
+                            let if_init_arr = self.gen_malloc_array("i32", flav_if_init_defered_ids.len(), ctx)?;
+                            let mut j = 0;
+                            for id in flav_if_init_defered_ids.iter() {
+                                self.gen_insert_array_element(&if_init_arr, &id.to_string(), "i32", j, ctx);
+                                j += 1;
+                            }
+                            ctx.code.add(format!("store i32* {}, i32** {}", if_init_arr, if_init_arr_ptr));
+                            // Pass the number of defered assignments the flavor depends on
+                            let if_init_cnt_ptr = ctx.var_ids.next();
+                            ctx.code.add(format!("{} = getelementptr %flavor_t, %flavor_t* {}, i32 {}, i32 {}", if_init_cnt_ptr, flavors, idx, 6));
+                            ctx.code.add(format!("store i32 {}, i32* {}", flav_if_init_defered_ids.len(), if_init_cnt_ptr));
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        // Generate continuation args
+        let cont_struct = self.gen_create_arg_struct(&sir.funcs[switch_for.cont].params, ".ac", ctx)?;
+
+        // Call runtime
+        ctx.code.add(format!(
+            "call void @weld_rt_start_switch(%work_t* %cur.work, %flavor_t* {}, i8* {}, \
+                                void (%work_t*, i32)* @f{}_par, i64 0, \
+                                i64 {}, i32 {}, i32 {})",
+            flavors,
+            cont_struct,
+            switch_for.cont,
+            num_iters_str,
+            grain_size,
+            switch_for.flavors.len()
+        ));
+        ctx.code.add(format!("br label %fn.end"));
+        ctx.code.add("fn.end:");
+        ctx.code.add("ret void");
+        ctx.code.add("}\n\n");
+
+        // Create switch function
+        let id = funcs.iter().map(|f| f.id.to_string()).collect::<Vec<String>>().join("_f");
+        let func_name = format!("f{}_switch", id);
+        self.body_code.add(format!("define void @{}({}, i32 %cur.tid) {{", func_name, serial_arg_types));
+        self.body_code.add(format!("fn.entry:"));
+        self.body_code.add(&ctx.alloca_code.result());
+        self.body_code.add(&ctx.code.result());
+
+        Ok(func_name)
     }
 
     /// Generates all the functions required to run a single parallel for loop. This includes the
@@ -1696,9 +2067,77 @@ impl LlvmGenerator {
 
         // Generate functions which call the continuation and wrapper functions
         // used by the runtime to call the loop body.
-        self.gen_loop_wrapper_function(&par_for, sir, func)?;
-        self.gen_parallel_runtime_callback_function(func)?;
-        self.gen_loop_continuation_function(&par_for, sir)?;
+        if par_for.switched {
+            // Different wrapper function for entry loops
+            if par_for.switch_entry {
+                self.gen_switch_entry_loop_wrapper_function(&par_for, sir, func)?;
+            } else {
+                self.gen_loop_wrapper_function(&par_for, sir, func)?;
+            }
+        } else {
+            self.gen_loop_wrapper_function(&par_for, sir, func)?;
+            // Only need parallel callback for loop bodies that are not part of a switch
+            self.gen_parallel_runtime_callback_function(func, 0)?;
+            self.gen_loop_continuation_function(&sir.funcs[par_for.cont])?;
+        }
+
+        Ok(())
+    }
+
+    /// Generates the parallel runtime callback function for a simple function. This function calls the
+    /// function which executes the actual work after unpacking the parameters from the work_t struct.
+    fn gen_simple_runtime_callback_function(&mut self, func: &SirFunction) -> WeldResult<()> {
+        let mut ctx = &mut FunctionContext::new(false);
+        self.gen_unload_arg_struct(&func.params, ".load", 0, &mut ctx)?;
+        self.gen_store_args(&func.params, ".load", "", &mut ctx)?;
+        // self.gen_create_stack_mergers(&func.params, &mut ctx)?;
+        ctx.code.add(format!("%cur.tid = call i32 @weld_rt_thread_id()"));
+        // self.gen_create_global_mergers(&func.params, ".ptr", &mut ctx)?;
+        self.gen_load_args(&func.params, ".arg", "", &mut ctx)?;
+        let body_arg_types = try!(self.get_arg_str(&func.params, ".arg"));
+        // self.gen_create_new_vb_pieces(&func.params, ".arg", &mut ctx)?;
+        ctx.code.add("br label %fn_call");
+        ctx.code.add("fn_call:");
+        ctx.code.add(format!("call void @f{}({}, i32 %cur.tid)", func.id, body_arg_types));
+        // self.gen_store_stack_mergers(&func.params, &mut ctx)?;
+        ctx.code.add("ret void");
+        ctx.code.add("}\n\n");
+        self.body_code.add(format!("define void @f{}_par(%work_t* %cur.work, i32 %flavor) {{", func.id));
+        self.body_code.add("entry:");
+        self.body_code.add(&ctx.alloca_code.result());
+        self.body_code.add(&ctx.code.result());
+        Ok(())
+    }
+
+    pub fn gen_defered_assign_functions(&mut self, sir: &SirProgram, cond_func: &SirFunction, build_func: &SirFunction) -> WeldResult<()> {
+        // Generate condition function as well as callback
+        let cond_ctx = &mut FunctionContext::new(true);
+        cond_ctx.alloca_code.add(format!("define void @f{}(i1* %weld_rt_out) {{", cond_func.id));
+        cond_ctx.alloca_code.add("fn.entry:");
+        for (arg, ty) in cond_func.locals.iter() {
+            let arg_str = llvm_symbol(&arg);
+            let ty_str = self.llvm_type(&ty)?;
+            cond_ctx.add_alloca(&arg_str, &ty_str)?;
+        }
+        cond_ctx.code.add("br label %b.b0");
+        self.gen_function_body(sir, cond_func, cond_ctx)?;
+        cond_ctx.code.add("body.end:");
+        cond_ctx.code.add("ret void\n}\n\n");
+        self.body_code.add(&cond_ctx.alloca_code.result());
+        self.body_code.add(&cond_ctx.code.result());
+
+        // Generate build function as well as callback
+        let build_ctx = &mut FunctionContext::new(true);
+        let arg_types = self.get_arg_str(&build_func.params, ".in")?;
+        self.gen_function_header(&arg_types, build_func, build_ctx)?;
+        build_ctx.code.add("br label %b.b0");
+        self.gen_function_body(sir, build_func, build_ctx)?;
+        build_ctx.code.add("body.end:");
+        build_ctx.code.add("ret void\n}\n\n");
+        self.body_code.add(&build_ctx.alloca_code.result());
+        self.body_code.add(&build_ctx.code.result());
+
+        self.gen_simple_runtime_callback_function(build_func)?;
 
         Ok(())
     }
@@ -1727,17 +2166,40 @@ impl LlvmGenerator {
         Ok(())
     }
 
+    pub fn add_lazy_function_callback(&mut self, sir: &SirProgram, func_id: usize) -> WeldResult<()> {
+        let func = &sir.funcs[func_id];
+
+        match func.lazy {
+            Some(LazyFunctionType::ForFlavor(ref flavor, flavor_idx)) => {
+                self.gen_switch_for_flavor(func, flavor, flavor_idx, sir)?;
+            },
+            Some(LazyFunctionType::DeferedBuild) => {
+                return compile_err!("Internal error: Lazy compilation of defered build not supported yet");
+            },
+            _ => {
+                return compile_err!("Internal error: Function {} is not a lazy function!", func_id);
+            }
+        }
+        Ok(())
+    }
+
     /// Add a function to the generated program, passing its parameters and return value through
     /// pointers encoded as i64. This is used for the main entry point function into Weld modules
     /// to pass them arbitrary structures.
     pub fn add_function_on_pointers(&mut self, name: &str, sir: &SirProgram) -> WeldResult<()> {
+        // Generate the global variables
+        for (glob_name, glob_ty) in sir.global_vars.iter() {
+            self.gen_global_var_definition(glob_name, glob_ty)?;
+        }
+        self.body_code.add("\n");
+
         // First add the function on raw values, which we'll call from the pointer version.
         self.gen_top_level_function(sir, &sir.funcs[0])?;
         // Generates an entry point.
         let mut par_top_ctx = &mut FunctionContext::new(false);
-        par_top_ctx.code.add("define void @f0_par(%work_t* %cur.work) {");
+        par_top_ctx.code.add("define void @f0_par(%work_t* %cur.work, i32 %flavor) {");
         par_top_ctx.code.add(format!("%cur.tid = call i32 @weld_rt_thread_id()"));
-        self.gen_unload_arg_struct(&sir.funcs[0].params, "", &mut par_top_ctx)?;
+        self.gen_unload_arg_struct(&sir.funcs[0].params, "", 0, &mut par_top_ctx)?;
         let top_arg_types = self.get_arg_str(&sir.funcs[0].params, "")?;
         par_top_ctx.code.add(format!("call void @f0({}, i32 %cur.tid)", top_arg_types));
         par_top_ctx.code.add("ret void");
@@ -1750,13 +2212,18 @@ impl LlvmGenerator {
 
         let mut run_ctx = &mut FunctionContext::new(false);
 
-        run_ctx.code.add(format!("define i64 @{}(i64 %r.input) {{", name));
+        run_ctx.code.add(format!("define external i64 @{}(i64 %r.input) {{", name));
         // Unpack the input, which is always struct defined by the type %input_arg_t in prelude.ll.
         run_ctx.code.add(format!("%r.inp_typed = inttoptr i64 %r.input to %input_arg_t*"));
         run_ctx.code.add(format!("%r.inp_val = load %input_arg_t, %input_arg_t* %r.inp_typed"));
         run_ctx.code.add(format!("%r.args = extractvalue %input_arg_t %r.inp_val, 0"));
         run_ctx.code.add(format!("%r.nworkers = extractvalue %input_arg_t %r.inp_val, 1"));
         run_ctx.code.add(format!("%r.memlimit = extractvalue %input_arg_t %r.inp_val, 2"));
+        run_ctx.code.add(format!("%r.module = extractvalue %input_arg_t %r.inp_val, 3"));
+        run_ctx.code.add(format!("%r.module_typed = inttoptr i64 %r.module to i8*"));
+        run_ctx.code.add(format!("%r.explore_period = extractvalue %input_arg_t %r.inp_val, 4"));
+        run_ctx.code.add(format!("%r.explore_length = extractvalue %input_arg_t %r.inp_val, 5"));
+        run_ctx.code.add(format!("%r.exploit_period = extractvalue %input_arg_t %r.inp_val, 6"));
         // Code to load args and call function
         run_ctx.code.add(format!(
             "%r.args_typed = inttoptr i64 %r.args to {args_type}*
@@ -1768,6 +2235,7 @@ impl LlvmGenerator {
         for (i, a) in sir.top_params.iter().enumerate() {
             arg_pos_map.insert(a.name.clone(), i);
         }
+
         for (arg, _) in sir.funcs[0].params.iter() {
             let idx = arg_pos_map.get(arg).unwrap();
             run_ctx.code.add(format!("{} = extractvalue {} %r.args_val, {}", llvm_symbol(arg), args_type, idx));
@@ -1785,7 +2253,7 @@ impl LlvmGenerator {
         let typed_out_ptr = run_ctx.var_ids.next();
         let final_address = run_ctx.var_ids.next();
         run_ctx.code.add(format!(
-            "{rid} = call i64 @weld_run_begin(void (%work_t*)* @f0_par, i8* {run_struct}, i64 %r.memlimit, i32 %r.nworkers)
+            "{rid} = call i64 @weld_run_begin(void (%work_t*, i32)* @f0_par, i8* {run_struct}, i64 %r.memlimit, i32 %r.nworkers, i8* %r.module_typed, i32 %r.explore_period, i32 %r.explore_length, i32 %r.exploit_period)
              %res_ptr = call i8* @weld_run_get_result(i64 {rid})
              %res_address = ptrtoint i8* %res_ptr to i64
              {errno} = call i64 @weld_run_get_errno(i64 {rid})
@@ -1869,6 +2337,13 @@ impl LlvmGenerator {
                 }
                 self.bld_names.get(bk).unwrap().to_string()
             }
+
+            BloomFilter(ref elem) => {
+                if self.bloom_filter_names.get(elem) == None {
+                    self.gen_bloom_filter_definition(elem)?
+                }
+                self.bloom_filter_names.get(elem).unwrap().to_string()
+            } 
 
             _ => {
                 return compile_err!("Unsupported type {}", ty)?
@@ -2326,6 +2801,33 @@ impl LlvmGenerator {
         Ok(())
     }
 
+    fn gen_global_var_definition(&mut self, sym: &Symbol, ty: &Type) -> WeldResult<()> {
+        let name = llvm_symbol(sym);
+        let elem_ty = self.llvm_type(ty)?;
+        let zero_literal = binop_identity(BinOpKind::Add, ty)?;
+        // Add this to body rather than prelude, because we do not want this value to be initialized again
+        // for potential later modules.
+        self.body_code.add(format!("{} = global {} {}", name, elem_ty, zero_literal));
+        Ok(())
+    }
+
+    /// Generates a bloom filter definition (right now just an alias for i8*)
+    fn gen_bloom_filter_definition(&mut self, elem: &Type) -> WeldResult<()> {
+        let elem_ty = self.llvm_type(elem)?;
+        let name = self.bloom_filter_ids.next();
+        let elem_prefix = llvm_prefix(&elem_ty);
+        self.bloom_filter_names.insert(elem.clone(), name.clone());
+
+        self.prelude_code.add(format!(
+            include_str!("resources/bloomfilter.ll"),
+            ELEM=&elem_ty,
+            ELEM_PREFIX=&elem_prefix,
+            NAME=&name.replace("%", "")));
+        self.prelude_code.add("\n");
+
+        Ok(())
+    }
+
     fn string_literal(&mut self, string: &str, vec_ty: &str, ctx: &mut FunctionContext) -> WeldResult<String> {
         let global = self.get_string_ptr(string).unwrap();
         let len = self.escape_str(string).len();
@@ -2365,6 +2867,13 @@ impl LlvmGenerator {
                 VECSIZE=&format!("{}", llvm_simd_size(elem)?)));
             self.prelude_code.add("\n");
         }
+        if let &Scalar(I8) = elem {
+            self.prelude_code.add(format!(
+                include_str!("resources/vector/strslice.ll"),
+                ELEM=&elem_ty,
+                NAME=&name.replace("%", "")));
+            self.prelude_code.add("\n");
+        }
         Ok(())
     }
 
@@ -2380,6 +2889,8 @@ impl LlvmGenerator {
         let kv_struct_ty = self.llvm_type(&elem)?;
         let kv_vec = Box::new(Vector(elem.clone()));
         let kv_vec_ty = self.llvm_type(&kv_vec)?;
+        let k_vec = Box::new(Vector(Box::new(key.clone())));
+        let k_vec_ty = self.llvm_type(&k_vec)?;
 
         let dict_def = format!(include_str!("resources/dictionary/dictionary.ll"),
             NAME=&name.replace("%", ""),
@@ -2387,7 +2898,8 @@ impl LlvmGenerator {
             KEY_PREFIX=&key_prefix,
             VALUE=&value_ty,
             KV_STRUCT=&kv_struct_ty,
-            KV_VEC=&kv_vec_ty);
+            KV_VEC=&kv_vec_ty,
+            K_VEC=&k_vec_ty);
 
         self.prelude_code.add(&dict_def);
         self.prelude_code.add("\n");
@@ -2479,6 +2991,11 @@ impl LlvmGenerator {
                 let bld_ty_str = self.llvm_type(&bld_ty)?;
                 self.bld_names.insert(bk.clone(), format!("{}.vm.bld", bld_ty_str));
             }
+            BloomBuilder(ref elem) => {
+                let bld_ty = BloomFilter(elem.clone());
+                let bld_ty_str = self.llvm_type(&bld_ty)?;
+                self.bld_names.insert(bk.clone(), format!("{}.bld", bld_ty_str));
+            }
         }
         Ok(())
     }
@@ -2512,7 +3029,6 @@ impl LlvmGenerator {
 
         let size = llvm_simd_size(vec_ty)?;
         let vec_ty_str = self.llvm_type(vec_ty)?;
-        let size_str = format!("{}", size);
 
         let value_str = llvm_literal((*kind).clone()).unwrap();
         let elem_ty_str = match *kind {
@@ -2532,19 +3048,18 @@ impl LlvmGenerator {
             }
         }.to_string();
 
-        let insert_str = format!("insertelement <{size} x {elem}> $NAME, {elem} {value}, i32 $INDEX",
-                                 size=size_str, elem=elem_ty_str, value=value_str);
+        let single = format!("{elem} {value}", elem=elem_ty_str, value=value_str);
 
-        let mut prev_name = "undef".to_string();
-        for i in 0..size {
-            let replaced = insert_str.replace("$NAME", &prev_name);
-            let replaced = replaced.replace("$INDEX", format!("{}", i).as_str());
-            let name = ctx.var_ids.next().to_string();
-            ctx.code.add(format!("{} = {}", name, replaced));
-            prev_name = name;
+        let mut result = String::new();
+        result.push_str("<");
+        for _ in 0..size-1 {
+            result.push_str(&single);
+            result.push_str(", ");
         }
+        result.push_str(&single);
+        result.push_str(">");
 
-        self.gen_store_var(&prev_name, output, &vec_ty_str, ctx);
+        self.gen_store_var(&result, output, &vec_ty_str, ctx);
         Ok(())
     }
 
@@ -2567,7 +3082,7 @@ impl LlvmGenerator {
             Scalar(_) | Simd(_) => {
                 match *bin_op {
                     Max | Min => {
-                        assert!(self.gen_minmax(&llvm_ty, bin_op, arg1, arg2, &res, arg_ty, var_ids, code).is_ok());
+                        self.gen_minmax(&llvm_ty, bin_op, arg1, arg2, &res, arg_ty, var_ids, code)?;
                     }
                     _ => {
                         code.add(format!("{} = {} {} {}, {}",
@@ -2785,7 +3300,7 @@ impl LlvmGenerator {
                 self.prelude_code.add_code(&serialize_code);
                 self.prelude_code.add("\n");
             }
-            Simd(_) | Builder(_, _) | Function(_, _) => {
+            Simd(_) | Builder(_, _) | Function(_, _) | BloomFilter(_) => {
                 // Non-serializable types.
                 return compile_err!("Cannot serialize type {:?}", expr_ty);
             }
@@ -2955,7 +3470,7 @@ impl LlvmGenerator {
                 self.prelude_code.add("\n");
 
             }
-            Simd(_) | Builder(_, _) | Function(_, _) => {
+            Simd(_) | Builder(_, _) | Function(_, _) | BloomFilter(_) => {
                 // Non-deserializable types.
                 return compile_err!("Cannot deserialize to type {:?}", output_ty);
             }
@@ -3143,7 +3658,7 @@ impl LlvmGenerator {
         for b in func.blocks.iter() {
             ctx.code.add(format!("b.b{}:", b.id));
             for s in b.statements.iter() {
-                self.gen_statement(s, func, ctx)?
+                self.gen_statement(s, sir, func, ctx)?
             }
             self.gen_terminator(&b.terminator, sir, func, ctx)?
         }
@@ -3151,8 +3666,8 @@ impl LlvmGenerator {
     }
 
     /// Generate code for a single statement, appending it to the code in a FunctionContext.
-    fn gen_statement(&mut self, statement: &Statement, func: &SirFunction, ctx: &mut FunctionContext) -> WeldResult<()> {
-        let ref output = statement.output.clone().unwrap_or(Symbol::new("unused", 0));
+    fn gen_statement(&mut self, statement: &Statement, sir: &SirProgram, func: &SirFunction, ctx: &mut FunctionContext) -> WeldResult<()> {
+        let ref output = statement.output.clone().unwrap_or(Symbol::new("unused", 0, false));
         ctx.code.add(format!("; {}", statement));
         if self.trace_run {
             self.gen_puts(&format!("  {}", statement), ctx);
@@ -3192,6 +3707,43 @@ impl LlvmGenerator {
                 arg_tys.push(format!("{}* {}", &output_ll_ty, &output_ll_sym));
                 let parameters = arg_tys.join(", ");
                 ctx.code.add(format!("call void @{}({})", symbol_name, parameters));
+            }
+
+            DeferedAssign { id, cond_func, build_func, ref depends_on } => {
+                // Generate condition and build functions
+                self.gen_defered_assign_functions(sir, &sir.funcs[cond_func],  &sir.funcs[build_func])?;
+
+                // Build struct with build data
+                // self.gen_create_global_mergers(&sir.funcs[build_func].params, ".ptr", ctx)?;
+                self.gen_load_args(&sir.funcs[build_func].params, ".ab", "", ctx)?;
+                let build_params = self.gen_create_arg_struct(&sir.funcs[build_func].params, ".ab", ctx)?;
+
+                // Build array with globals that assignment depends on
+                let arr_tmp = self.gen_malloc_array("i8*", depends_on.len(), ctx)?;
+                let mut i = 0;
+                for sym in depends_on.iter() {
+                    let (ll_ty, ll_sym) = self.llvm_type_and_name(func, sym)?;
+                    let i8_tmp = ctx.var_ids.next();
+                    ctx.code.add(format!("{} = bitcast {}* {} to i8*", i8_tmp, ll_ty, ll_sym));
+                    self.gen_insert_array_element(&arr_tmp, &i8_tmp, "i8*", i, ctx);
+                    i += 1;
+                }
+
+                // Call runtime
+                ctx.code.add(format!("call void @weld_rt_defer_build(i32 {}, void (i1*)* @f{}, void (%work_t*, i32)* @f{}_par, i8* {}, i8** {})", id, cond_func, build_func, build_params, arr_tmp));
+            }
+
+            GetDefered(id) => {
+                let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
+
+                let i8_ptr = ctx.var_ids.next();
+                let ty_ptr = ctx.var_ids.next();
+
+                // In alloca_code so it runs only once (in case of for loops)
+                ctx.alloca_code.add(format!("{} = call i8* @weld_rt_get_defered_result(i32 {})", i8_ptr, id));
+                ctx.alloca_code.add(format!("{} = bitcast i8* {} to {}*", ty_ptr, i8_ptr, output_ll_ty));
+                let loaded = self.gen_load_var(&ty_ptr, &output_ll_ty, ctx)?;
+                self.gen_store_var(&loaded, &output_ll_sym, &output_ll_ty, ctx);
             }
 
             MakeVector(ref elems) => {
@@ -3410,6 +3962,7 @@ impl LlvmGenerator {
                     slot, child_ll_ty, child_prefix, child_ll_ty, child_tmp, key_ll_ty, key_tmp));
                 ctx.code.add(format!("{} = call i1 {}.slot.filled({}.slot {})",
                     res_tmp, child_prefix, child_ll_ty, slot));
+
                 self.gen_store_var(&res_tmp, &output_ll_sym, &output_ll_ty, ctx);
             }
 
@@ -3431,6 +3984,24 @@ impl LlvmGenerator {
                                                 child_tmp,
                                                 index_tmp,
                                                 size_tmp));
+                self.gen_store_var(&res_ptr, &output_ll_sym, &output_ll_ty, ctx);
+            }
+
+            StrSlice { ref child, ref offset } => {
+                let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
+                let (child_ll_ty, child_ll_sym) = self.llvm_type_and_name(func, child)?;
+                let (offset_ll_ty, offset_ll_sym) = self.llvm_type_and_name(func, offset)?;
+                let vec_prefix = llvm_prefix(&child_ll_ty);
+                let child_tmp = self.gen_load_var(&child_ll_sym, &child_ll_ty, ctx)?;
+                let offset_tmp = self.gen_load_var(&offset_ll_sym, &offset_ll_ty, ctx)?;
+                let res_ptr = ctx.var_ids.next();
+                ctx.code.add(format!("{} = call {} {}.strslice({} {}, i64{})",
+                                                res_ptr,
+                                                output_ll_ty,
+                                                vec_prefix,
+                                                child_ll_ty,
+                                                child_tmp,
+                                                offset_tmp));
                 self.gen_store_var(&res_ptr, &output_ll_sym, &output_ll_ty, ctx);
             }
 
@@ -3483,7 +4054,7 @@ impl LlvmGenerator {
                                     for (i, b) in keyfunc.blocks.iter().enumerate() {
                                         keyfunc_ctx.code.add(format!("b.b{}:", b.id));
                                         for s in b.statements.iter() {
-                                            self.gen_statement(s, keyfunc, keyfunc_ctx)?
+                                            self.gen_statement(s, sir, keyfunc, keyfunc_ctx)?
                                         }
                                         if i != end_block_index {
                                             if let Terminator::Branch { ref cond, on_true, on_false} = b.terminator {
@@ -3577,6 +4148,17 @@ impl LlvmGenerator {
                 self.gen_store_var(&res_tmp, &output_ll_sym, &output_ll_ty, ctx);
             }
 
+            Keys(ref child) => {
+                let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
+                let (child_ll_ty, child_ll_sym) = self.llvm_type_and_name(func, child)?;
+                let dict_prefix = llvm_prefix(&child_ll_ty);
+                let child_tmp = self.gen_load_var(&child_ll_sym, &child_ll_ty, ctx)?;
+                let res_tmp = ctx.var_ids.next();
+                ctx.code.add(format!("{} = call {} {}.keys({} {})",
+                    res_tmp, output_ll_ty, dict_prefix, child_ll_ty, child_tmp));
+                self.gen_store_var(&res_tmp, &output_ll_sym, &output_ll_ty, ctx);
+            }
+
             Length(ref child) => {
                 let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
                 let (child_ll_ty, child_ll_sym) = self.llvm_type_and_name(func, child)?;
@@ -3642,12 +4224,27 @@ impl LlvmGenerator {
                 }
             }
 
-            NewBuilder { ref arg, ref ty } => {
+            NewBuilder { ref args, ref ty } => {
                 if let Builder(ref bld_kind, ref annotations) = *ty {
-                    self.gen_new_builder(bld_kind, annotations, arg, output, func, ctx)?;
+                    self.gen_new_builder(bld_kind, annotations, args, output, func, ctx)?;
                 } else {
                     return compile_err!("Non builder type {} found in NewBuilder", ty)
                 }
+            }
+
+            BloomFilterContains { ref bf, ref item } => {
+                let (bf_ll_ty, bf_ll_sym) = self.llvm_type_and_name(func, bf)?;
+                let (item_ll_ty, item_ll_sym) = self.llvm_type_and_name(func, item)?;
+                let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
+                let bf_prefix = llvm_prefix(&bf_ll_ty);
+
+                let bf_tmp = self.gen_load_var(&bf_ll_sym, &bf_ll_ty, ctx)?;
+                let item_tmp = self.gen_load_var(&item_ll_sym, &item_ll_ty, ctx)?;
+
+                let res = ctx.var_ids.next();
+
+                ctx.code.add(format!("{} = call i1 {}.contains({} {}, {} {})", res, bf_prefix, bf_ll_ty, bf_tmp, item_ll_ty, item_tmp));
+                self.gen_store_var(&res, &output_ll_sym, &output_ll_ty, ctx);
             }
         }
 
@@ -3719,7 +4316,7 @@ impl LlvmGenerator {
                         let item_tmp = self.gen_simd_extract(value_ty, &value_tmp, i, ctx)?;
                         let item_stack = ctx.var_ids.next();
                         ctx.add_alloca(&item_stack, &item_ll_ty)?;
-                        let item_stack_sym = Symbol::new(&item_stack.replace("%", ""), 0);
+                        let item_stack_sym = Symbol::new(&item_stack.replace("%", ""), 0, false);
                         self.gen_store_var(&item_tmp, &item_stack, &item_ll_ty, ctx);
                         self.gen_merge(builder_kind, builder, &item_ty, &item_stack_sym, func, ctx)?;
                     }
@@ -3799,6 +4396,12 @@ impl LlvmGenerator {
                                         bld_ptr_raw,
                                         elem_ll_ty));
                 self.gen_merge_op(&bld_ptr, &elem_var, &elem_ll_ty, op, t, ctx)?;
+            }
+
+            BloomBuilder(_) => {
+                let bld_tmp = self.gen_load_var(&bld_ll_sym, &bld_ll_ty, ctx)?;
+                let val_tmp = self.gen_load_var(&val_ll_sym, &val_ll_ty, ctx)?;
+                ctx.code.add(format!("call {} {}.merge({} {}, {} {})", bld_ll_ty, bld_prefix, bld_ll_ty, bld_tmp, val_ll_ty, val_tmp));
             }
         }
         Ok(())
@@ -4062,6 +4665,23 @@ impl LlvmGenerator {
                                     bldType = bld_ty_str,
                                     output = llvm_symbol(output)));
             }
+
+            BloomBuilder(_) => {
+                let bld_ty_str = self.llvm_type(&bld_ty)?;
+                let bld_prefix = llvm_prefix(&bld_ty_str);
+                let res_ty_str = self.llvm_type(&res_ty)?;
+                let bld_tmp =
+                    self.gen_load_var(llvm_symbol(builder).as_str(), &bld_ty_str, ctx)?;
+                let res_tmp = ctx.var_ids.next();
+                ctx.code.add(format!("{} = call {} {}.result({} {})",
+                                        res_tmp,
+                                        res_ty_str,
+                                        bld_prefix,
+                                        bld_ty_str,
+                                        bld_tmp));
+                                        
+                self.gen_store_var(&res_tmp, &llvm_symbol(output), &res_ty_str, ctx);
+            }
         }
 
         Ok(())
@@ -4072,7 +4692,7 @@ impl LlvmGenerator {
     fn gen_new_builder(&mut self,
                        builder_kind: &BuilderKind,
                        annotations: &Annotations,
-                       arg: &Option<Symbol>,
+                       args: &Vec<Symbol>,
                        output: &Symbol,
                        func: &SirFunction,
                        ctx: &mut FunctionContext)
@@ -4089,13 +4709,13 @@ impl LlvmGenerator {
         match *builder_kind {
             Appender(_) => {
                 let bld_tmp = ctx.var_ids.next();
-                let size_tmp = if let Some(ref sym) = *arg {
-                    let (arg_ll_ty, arg_ll_sym) = self.llvm_type_and_name(func, sym)?;
+                let size_tmp = if args.len() > 0 {
+                    let (arg_ll_ty, arg_ll_sym) = self.llvm_type_and_name(func, &args[0])?;
                     self.gen_load_var(&arg_ll_sym, &arg_ll_ty, ctx)?
                 } else {
                     format!("{}", builder_size)
                 };
-                let fixed_size = if let Some(_) = *arg { "1" } else { "0" };
+                let fixed_size = if args.len() > 0 { "1" } else { "0" };
 
                 ctx.code.add(format!(
                     "{} = call {} {}.new(i64 {}, %work_t* \
@@ -4113,12 +4733,10 @@ impl LlvmGenerator {
                 let bld_tmp = ctx.var_ids.next();
                 // Generate code to initialize the builder.
                 let iden_elem = binop_identity(*op, elem_ty.as_ref())?;
-                let init_elem = match *arg {
-                    Some(ref s) => {
-                        let arg_str = self.gen_load_var(llvm_symbol(s).as_str(), &elem_type, ctx)?;
-                        arg_str
-                    }
-                    _ => iden_elem.clone(),
+                let init_elem = if args.len() > 0 {
+                    self.gen_load_var(llvm_symbol(&args[0]).as_str(), &elem_type, ctx)?
+                } else {
+                    iden_elem.clone()
                 };
                 let bld_tmp_stack = format!("{}.stack", bld_tmp);
                 let bld_stack_ty_str = format!("{}.piece", bld_ty_str);
@@ -4129,8 +4747,8 @@ impl LlvmGenerator {
             }
             DictMerger(_, _, _) | GroupMerger(_, _) => {
                 let bld_tmp = ctx.var_ids.next();
-                let max_local_bytes = if let Some(ref sym) = *arg {
-                    let (arg_ll_ty, arg_ll_sym) = self.llvm_type_and_name(func, sym)?;
+                let max_local_bytes = if args.len() > 0 {
+                    let (arg_ll_ty, arg_ll_sym) = self.llvm_type_and_name(func, &args[0])?;
                     self.gen_load_var(&arg_ll_sym, &arg_ll_ty, ctx)?
                 } else {
                     format!("{}", 100000000)
@@ -4143,12 +4761,12 @@ impl LlvmGenerator {
                                         max_local_bytes));
                 self.gen_store_var(&bld_tmp, &llvm_symbol(output), &bld_ty_str, ctx);
             }
-            VecMerger(ref elem, _) => {
-                match *arg {
-                    Some(ref s) => {
+            VecMerger(ref elem, ref op) => {
+                match args.len() {
+                    1 => {
                         let arg_ty = self.llvm_type(&Vector(elem.clone()))?;
                         let arg_ty_str = arg_ty.to_string();
-                        let arg_str = self.gen_load_var(llvm_symbol(s).as_str(), &arg_ty_str, ctx)?;
+                        let arg_str = self.gen_load_var(llvm_symbol(&args[0]).as_str(), &arg_ty_str, ctx)?;
                         let bld_tmp = ctx.var_ids.next();
                         ctx.code.add(format!("{} = call {} {}.new({} \
                                                 {})",
@@ -4159,10 +4777,25 @@ impl LlvmGenerator {
                                                 arg_str));
                         self.gen_store_var(&bld_tmp, &llvm_symbol(output), &bld_ty_str, ctx);
                     }
-                    None => {
+                    _ => {
                         compile_err!("Internal error: NewBuilder(VecMerger) \
-                                    expected argument in LLVM codegen")?
+                                    expected single argument in LLVM codegen")?
                     }
+                }
+            }
+            BloomBuilder(_) => {
+                if args.len() == 1 {
+                    let (cap_ll_ty, cap_ll_sym) = self.llvm_type_and_name(func, &args[0])?;
+                    let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
+
+                    let cap = self.gen_load_var(&cap_ll_sym, &cap_ll_ty, ctx)?;
+
+                    let bld_tmp = ctx.var_ids.next();
+                    ctx.code.add(format!("{} = call {} {}.new(i64 {})", bld_tmp, bld_ty_str, bld_prefix, cap));
+                
+                    self.gen_store_var(&bld_tmp, &output_ll_sym, &output_ll_ty, ctx);
+                } else {
+                    compile_err!("Internal error: NewBuilder(BloomBuilder) expected argument in LLVM codegen")?
                 }
             }
         }
@@ -4193,7 +4826,7 @@ impl LlvmGenerator {
                 // Generate the functions to execute the loop
                 self.gen_par_for_functions(pf, sir, &sir.funcs[pf.body])?;
                 // Call into the loop.
-                let params_sorted = get_combined_params(sir, pf);
+                let params_sorted = get_combined_params(&vec![&sir.funcs[pf.body], &sir.funcs[pf.cont]]);
                 let mut arg_types = String::new();
                 for (arg, ty) in params_sorted.iter() {
                     let ll_ty = self.llvm_type(&ty)?;
@@ -4202,7 +4835,31 @@ impl LlvmGenerator {
                     arg_types.push_str(&arg_str);
                 }
                 arg_types.push_str("%work_t* %cur.work");
+                if pf.switch_entry {
+                    arg_types.push_str(", i64 %lower.idx, i64 %upper.idx");
+                }
                 ctx.code.add(format!("call void @f{}_wrapper({}, i32 %cur.tid)", pf.body, arg_types));
+                ctx.code.add("br label %body.end");
+            }
+
+            SwitchFor(ref sf) => {
+                // Generate the continuation function.
+                self.gen_top_level_function(sir, &sir.funcs[sf.cont])?;
+                // Generate the functions to execute the switch.
+                let func_name = self.gen_switch_for_functions(sf, sir)?;
+                // Call into the switch function.
+                let mut funcs_and_cont = sf.flavors.iter().map(|fl|&sir.funcs[fl.for_func]).collect::<Vec<_>>();
+                funcs_and_cont.push(&sir.funcs[sf.cont]);
+                let params_sorted = get_combined_params(&funcs_and_cont);
+                let mut arg_types = String::new();
+                for (arg, ty) in params_sorted.iter() {
+                    let ll_ty = self.llvm_type(&ty)?;
+                    let arg_tmp = self.gen_load_var(llvm_symbol(arg).as_str(), &ll_ty, ctx)?;
+                    let arg_str = format!("{} {}, ", &ll_ty, arg_tmp);
+                    arg_types.push_str(&arg_str);
+                }
+                arg_types.push_str("%work_t* %cur.work");
+                ctx.code.add(format!("call void @{}({}, i32 %cur.tid)", func_name, arg_types));
                 ctx.code.add("br label %body.end");
             }
 
@@ -4245,6 +4902,36 @@ impl LlvmGenerator {
                 ctx.code.add(format!("{} = bitcast i8* {} to {}*", &elem_storage_typed, &elem_storage, &ty_str));
                 self.gen_store_var(&res_tmp, &elem_storage_typed, &ty_str, ctx);
                 ctx.code.add(format!("call void @weld_rt_set_result(i8* {})", elem_storage));
+                ctx.code.add("br label %body.end");
+            }
+
+            FunctionReturn(ref sym) => {
+                let ty = func.symbol_type(sym)?;
+                let ty_str = self.llvm_type(ty)?;
+                let res_tmp = self.gen_load_var(llvm_symbol(sym).as_str(), &ty_str, ctx)?;
+                ctx.code.add(format!("store {} {}, {}* %weld_rt_out", ty_str, res_tmp, ty_str));
+                ctx.code.add("br label %body.end");
+            }
+
+            DeferedSetResult { 
+                id,
+                ref result
+            } => {
+                let ty = func.symbol_type(result)?;
+                let ty_str = self.llvm_type(ty)?;
+
+                let res_tmp = self.gen_load_var(llvm_symbol(result).as_str(), &ty_str, ctx)?;
+                let result_size_ptr = ctx.var_ids.next();
+                let result_size = ctx.var_ids.next();
+                let i8_ptr = ctx.var_ids.next();
+                let ty_ptr = ctx.var_ids.next();
+
+                ctx.code.add(format!("{} = getelementptr inbounds {}, {}* null, i32 1", result_size_ptr, ty_str, ty_str));
+                ctx.code.add(format!("{} = ptrtoint {}* {} to i64", result_size, ty_str, result_size_ptr));
+                ctx.code.add(format!("{} = call i8* @malloc(i64 {})", i8_ptr, result_size));
+                ctx.code.add(format!("{} = bitcast i8* {} to {}*", ty_ptr, i8_ptr, ty_str));
+                self.gen_store_var(&res_tmp, &ty_ptr, &ty_str, ctx);
+                ctx.code.add(format!("call void @weld_rt_set_defered_result(i32 {}, i8* {})", id, i8_ptr));
                 ctx.code.add("br label %body.end");
             }
 
@@ -4395,7 +5082,12 @@ fn llvm_literal(k: LiteralKind) -> WeldResult<String> {
 
 /// Return the LLVM version of a Weld symbol (encoding any special characters for LLVM).
 fn llvm_symbol(symbol: &Symbol) -> String {
-    if symbol.id == 0 { format!("%{}", symbol.name) } else { format!("%{}.{}", symbol.name, symbol.id) }
+    match (symbol.id, symbol.global) {
+        (0, true) => format!("@{}", symbol.name),
+        (_, true) => format!("@{}.{}", symbol.name, symbol.id),
+        (0, false) => format!("%{}", symbol.name),
+        (_, false) => format!("%{}.{}", symbol.name, symbol.id)
+    }
 }
 
 fn binop_identity(op_kind: BinOpKind, ty: &Type) -> WeldResult<String> {
@@ -4687,12 +5379,14 @@ impl FunctionContext {
     }
 }
 
-fn get_combined_params(sir: &SirProgram, par_for: &ParallelForData) -> BTreeMap<Symbol, Type> {
-    let mut body_params = sir.funcs[par_for.body].params.clone();
-    for (arg, ty) in sir.funcs[par_for.cont].params.iter() {
-        body_params.insert(arg.clone(), ty.clone());
+fn get_combined_params(funcs: &Vec<&SirFunction>) -> BTreeMap<Symbol, Type> {
+    let mut combined_params = BTreeMap::new();
+    for func in funcs.iter() {
+        for (arg, ty) in func.params.iter() {
+            combined_params.insert(arg.clone(), ty.clone());
+        }
     }
-    body_params
+    combined_params
 }
 
 #[cfg(test)]
@@ -4704,7 +5398,7 @@ fn predicate_only(code: &str) -> WeldResult<Expr> {
     let optstr = ["predicate"];
     let optpass = optstr.iter().map(|x| (*OPTIMIZATION_PASSES.get(x).unwrap()).clone()).collect();
 
-    apply_opt_passes(&mut typed_e, &optpass, &mut CompilationStats::new(), false)?;
+    apply_opt_passes(&mut typed_e, &optpass, &mut CompilationStats::new(), false, false)?;
 
     Ok(typed_e)
 }

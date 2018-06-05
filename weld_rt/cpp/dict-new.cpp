@@ -605,6 +605,7 @@ public:
 
 
   Slot *lookup(int32_t hash, void *key) {
+    // printf("lookup\n");
     // First check the local dictionary.
     if (!finalized) {
       InternalDict *dict = local_dict();
@@ -738,6 +739,33 @@ public:
         memcpy(offset_buf, slot->key(), dict->key_size);
         offset_buf += dict->key_size + key_padding_bytes;
         memcpy(offset_buf, slot->value(dict->key_size), _packed_value_size);
+        offset++;
+      }
+    }
+    assert(offset == dict->size());
+    return (void *)buf;
+  }
+
+  /** Returns an array of keys, given this dictionary. The dictionary must be 
+   * finalized.
+   *
+   * @return a buffer of keys.
+   *
+   * */
+  void* new_k_vector() {
+    assert(finalized);
+    InternalDict *dict = global_dict();
+
+    uint8_t *buf = (uint8_t *)weld_run_malloc(weld_rt_get_run_id(),
+                                              dict->size() * dict->key_size);
+    memset(buf, 0, dict->key_size*dict->size());
+    long offset = 0;
+
+    for (long i = 0; i < dict->capacity(); i++) {
+      Slot *slot = dict->slot_at_index(i);
+      if (slot->header.filled) {
+        uint8_t *offset_buf = buf + offset * dict->key_size;
+        memcpy(offset_buf, slot->key(), dict->key_size);
         offset++;
       }
     }
@@ -899,6 +927,7 @@ extern "C" void weld_rt_dict_free(void *d) {
 }
 
 extern "C" void *weld_rt_dict_lookup(void *d, int32_t hash, void *key) {
+  // fprintf(stderr, "weld_rt_dict_lookup %p\n", d);
   WeldDict *wd = (WeldDict *)d;
   return (void *)wd->lookup(hash, key);
 }
@@ -919,6 +948,11 @@ extern "C" void *weld_rt_dict_to_array(void *d, int32_t value_offset,
 
   WeldDict *wd = (WeldDict *)d;
   return wd->new_kv_vector(value_offset, struct_size);
+}
+
+extern "C" void *weld_rt_dict_keys_to_array(void *d) {
+  WeldDict *wd = (WeldDict *)d;
+  return wd->new_k_vector();
 }
 
 extern "C" int64_t weld_rt_dict_size(void *d) {

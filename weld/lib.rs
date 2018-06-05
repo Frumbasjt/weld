@@ -363,7 +363,6 @@ impl WeldModule {
     /// Note that most Rust values cannot be passed into Weld directly. That is, it is *not* safe
     /// to simply pass a pointer to a `Vec<T>` into Weld directly.
     pub unsafe fn run(&mut self, conf: &WeldConf, arg: &WeldValue) -> WeldResult<WeldValue> {
-        let callable = self.llvm_module.llvm_mut();
         let ref parsed_conf = conf::parse(conf)?;
 
         // This is the required input format of data passed into a compiled module.
@@ -371,10 +370,15 @@ impl WeldModule {
                              input: arg.data as i64,
                              nworkers: parsed_conf.threads,
                              mem_limit: parsed_conf.memory_limit,
+                             module: self as *mut WeldModule as i64 ,
+                             explore_period: parsed_conf.explore_period,
+                             explore_length: parsed_conf.explore_length,
+                             exploit_period: parsed_conf.exploit_period,
                          });
         let ptr = Box::into_raw(input) as i64;
 
         // Runs the Weld program.
+        let callable = self.llvm_module.llvm_mut();
         let raw = callable.run(ptr) as *const codegen::llvm::WeldOutputArgs;
         let result = (*raw).clone();
 

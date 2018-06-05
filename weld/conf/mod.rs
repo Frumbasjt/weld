@@ -14,10 +14,15 @@ pub const SUPPORT_MULTITHREAD_KEY: &'static str = "weld.compile.multithreadSuppo
 pub const TRACE_RUN_KEY: &'static str = "weld.compile.traceExecution";
 pub const OPTIMIZATION_PASSES_KEY: &'static str = "weld.optimization.passes";
 pub const EXPERIMENTAL_PASSES_KEY: &'static str = "weld.optimization.applyExperimentalTransforms";
+pub const ADAPTIVE_PASSES_KEY: &'static str = "weld.optimization.applyAdaptiveTransforms";
 pub const SIR_OPT_KEY: &'static str = "weld.optimization.sirOptimization";
 pub const LLVM_OPTIMIZATION_LEVEL_KEY: &'static str = "weld.llvm.optimization.level";
 pub const DUMP_CODE_KEY: &'static str = "weld.compile.dumpCode";
 pub const DUMP_CODE_DIR_KEY: &'static str = "weld.compile.dumpCodeDir";
+pub const ADAPTIVE_LAZY_COMPILATION_KEY: &'static str = "weld.adaptive.lazyCompilation";
+pub const ADAPTIVE_EXPLORE_PERIOD_KEY: &'static str = "weld.apaptive.explorePeriod";
+pub const ADAPTIVE_EXPLORE_LENGTH_KEY: &'static str = "weld.apaptive.exploreLength";
+pub const ADAPTIVE_EXPLOIT_PERIOD_KEY: &'static str = "weld.apaptive.exploitPeriod";
 
 // Default values of each key
 pub const DEFAULT_MEMORY_LIMIT: i64 = 1000000000;
@@ -27,22 +32,30 @@ pub const DEFAULT_SIR_OPT: bool = true;
 pub const DEFAULT_LLVM_OPTIMIZATION_LEVEL: u32 = 2;
 pub const DEFAULT_DUMP_CODE: bool = false;
 pub const DEFAULT_TRACE_RUN: bool = false;
-pub const DEFAULT_EXPERIMENTAL_PASSES: bool = false;
+pub const DEFAULT_EXPERIMENTAL_PASSES: bool = true;
+pub const DEFAULT_ADAPTIVE_PASSES: bool = true;
+pub const DEFAULT_ADAPTIVE_LAZY_COMPILATION: bool = true;
+pub const DEFAULT_ADAPTIVE_EXPLORE_PERIOD: i32 = 128;
+pub const DEFAULT_ADAPTIVE_EXPLOIT_PERIOD: i32 = 32;
+pub const DEFAULT_ADAPTIVE_EXPLORE_LENGTH: i32 = 4;
 
 lazy_static! {
     pub static ref DEFAULT_OPTIMIZATION_PASSES: Vec<Pass> = {
-        let m = ["loop-fusion", "unroll-static-loop", "infer-size", "short-circuit-booleans", "predicate", "vectorize", "fix-iterate"];
+        let m = ["loop-fusion", "unroll-static-loop", "infer-size", "adapt-reorder-filter-projection",
+                 "short-circuit-booleans", "predicate", "vectorize", "fix-iterate", "adapt-bloomfilter", "adaptive"];
         m.iter().map(|e| (*OPTIMIZATION_PASSES.get(e).unwrap()).clone()).collect()
     };
     pub static ref DEFAULT_DUMP_CODE_DIR: PathBuf = Path::new(".").to_path_buf();
 }
 
 /// Options for dumping code.
+#[derive(Clone)]
 pub struct DumpCodeConf {
     pub enabled: bool,
     pub dir: PathBuf,
 }
 
+#[derive(Clone)]
 /// A parsed configuration with correctly typed fields.
 pub struct ParsedConf {
     pub memory_limit: i64,
@@ -51,9 +64,14 @@ pub struct ParsedConf {
     pub trace_run: bool,
     pub enable_sir_opt: bool,
     pub enable_experimental_passes: bool,
+    pub enable_adaptive_passes: bool,
     pub optimization_passes: Vec<Pass>,
     pub llvm_optimization_level: u32,
     pub dump_code: DumpCodeConf,
+    pub lazy_compilation: bool,
+    pub explore_period: i32,
+    pub explore_length: i32,
+    pub exploit_period: i32,
 }
 
 /// Parse a configuration from a WeldConf key-value dictionary.
@@ -99,9 +117,29 @@ pub fn parse(conf: &WeldConf) -> WeldResult<ParsedConf> {
     let enable_experimental_passes = value.map(|s| parse_bool_flag(&s, "Invalid flag for applyExperimentalPasses"))
                       .unwrap_or(Ok(DEFAULT_EXPERIMENTAL_PASSES))?;
 
+    let value = get_value(conf, ADAPTIVE_PASSES_KEY);
+    let enable_adaptive_passes = value.map(|s| parse_bool_flag(&s, "Invalid flag for applyAdaptivePasses"))
+                      .unwrap_or(Ok(DEFAULT_ADAPTIVE_PASSES))?;
+
     let value = get_value(conf, TRACE_RUN_KEY);
     let trace_run = value.map(|s| parse_bool_flag(&s, "Invalid flag for trace.run"))
                       .unwrap_or(Ok(DEFAULT_TRACE_RUN))?;
+
+    let value = get_value(conf, ADAPTIVE_LAZY_COMPILATION_KEY);
+    let lazy_compilation_enabled = value.map(|s| parse_bool_flag(&s, "Invalid flag for lazyCompilation"))
+                      .unwrap_or(Ok(DEFAULT_ADAPTIVE_LAZY_COMPILATION))?;
+
+    let value = get_value(conf, ADAPTIVE_EXPLORE_PERIOD_KEY);
+    let adaptive_explore_period = value.map(|s| parse_positive_i32(&s, "Invalid value for explore period"))
+                      .unwrap_or(Ok(DEFAULT_ADAPTIVE_EXPLORE_PERIOD))?;
+
+    let value = get_value(conf, ADAPTIVE_EXPLORE_LENGTH_KEY);
+    let adaptive_explore_length = value.map(|s| parse_positive_i32(&s, "Invalid value for explore length"))
+                      .unwrap_or(Ok(DEFAULT_ADAPTIVE_EXPLORE_LENGTH))?;
+
+    let value = get_value(conf, ADAPTIVE_EXPLOIT_PERIOD_KEY);
+    let adaptive_exploit_period = value.map(|s| parse_positive_i32(&s, "Invalid value for exploit period"))
+                      .unwrap_or(Ok(DEFAULT_ADAPTIVE_EXPLOIT_PERIOD))?;
 
     Ok(ParsedConf {
         memory_limit: memory_limit,
@@ -110,12 +148,17 @@ pub fn parse(conf: &WeldConf) -> WeldResult<ParsedConf> {
         trace_run: trace_run,
         enable_sir_opt: sir_opt_enabled,
         enable_experimental_passes: enable_experimental_passes,
+        enable_adaptive_passes: enable_adaptive_passes,
         optimization_passes: passes,
         llvm_optimization_level: level,
         dump_code: DumpCodeConf {
             enabled: dump_code_enabled,
             dir: dump_code_dir,
-        }
+        },
+        lazy_compilation: lazy_compilation_enabled,
+        explore_period: adaptive_explore_period,
+        explore_length: adaptive_explore_length,
+        exploit_period: adaptive_exploit_period,
     })
 }
 
@@ -179,6 +222,14 @@ fn parse_llvm_optimization_level(s: &str) -> WeldResult<u32> {
     match s.parse::<u32>() {
         Ok(v) if v <= 3 => Ok(v),
         _ => compile_err!("Invalid LLVM optimization level: {}", s),
+    }
+}
+
+/// Parse an i32 that must be positive.
+fn parse_positive_i32(s: &str, err: &str) -> WeldResult<i32> {
+    match s.parse::<i32>() {
+        Ok(v) if v > 0 => Ok(v),
+        _ => compile_err!("{}: {}", err, s)
     }
 }
 

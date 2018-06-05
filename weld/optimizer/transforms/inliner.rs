@@ -108,19 +108,19 @@ pub fn inline_let(expr: &mut Expr) {
                 ref mut value,
                 ref mut body,
             } = expr.kind {
-                if symbol_usage_count(name, body) <= 1 {
+                if !symbol_is_switchfor_builder(name, body) && symbol_usage_count(name, body) <= 1 {
                     body.transform(&mut |ref mut expr| {
                         if let Ident(ref symbol) = expr.kind {
                             if symbol == name {
                                 return Some(*value.clone());
                             }
                         }
-                        return None;
+                        None
                     });
                     return Some(*body.clone());
                 }
             }
-            return None;
+            None
         });
     }
 }
@@ -273,6 +273,30 @@ fn symbol_usage_count(sym: &Symbol, expr: &Expr) -> u32 {
     usage_count
 }
 
+/// Returns true if the symbol is used as the builder of a switched for loop.
+/// TODO: Unnecessary if we just enforce SwitchFor to accept a minimum of two fors.
+fn symbol_is_switchfor_builder(sym: &Symbol, expr: &Expr) -> bool {
+    let mut result = false;
+    expr.traverse(&mut |ref e| {
+        if let SwitchFor { ref fors } = e.kind {
+            for pfor in fors {
+                if let Lambda { ref body, .. } = pfor.kind {
+                    if let For { ref builder, .. } = body.kind {
+                        if let Ident(ref symbol) = builder.kind {
+                            if sym == symbol {
+                                result = true;
+                            }
+                        }
+                    }
+                }
+                
+            }
+        }
+    });
+
+    result
+}
+
 #[test]
 fn inline_lets() {
     let mut e1 = typed_expression("let a = 1; a + 2");
@@ -299,3 +323,4 @@ fn inline_lets() {
     let e2 = typed_expression("1 + 2 + 3");
     assert!(e1.compare_ignoring_symbols(&e2).unwrap());
 }
+

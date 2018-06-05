@@ -1,7 +1,7 @@
 OS = $(shell uname -s)
 LLVM_VERSION = $(shell llvm-config --version | cut -d . -f 1,2)
 
-CFLAGS = -O3 -std=c++11 -Wall -fno-use-cxa-atexit -fPIC
+CFLAGS = -std=c++14 -Wno-c++11-narrowing -Wno-endif-labels -lstdc++ -fno-use-cxa-atexit -fPIC -Ilib -O3
 ifeq (${OS}, Darwin)
   # macOS - clang++ is sym-linked to clang-6.0
   CLANG ?= clang-${LLVM_VERSION}
@@ -31,13 +31,16 @@ dict.o: dict-new.cpp
 gb.o: gb-new.cpp
 	${CLANG} ${CFLAGS} -c $< -o $@
 
+bf.o: bf.cpp
+	${CLANG} ${CFLAGS} -c $< -o $@
+
 merger.o: merger.cpp
 	${CLANG} ${CFLAGS} -c $< -o $@
 
 runtime.o: runtime.cpp
 	${CLANG} ${CFLAGS} -c $< -o $@
 
-weldrt.o: vb.o dict.o gb.o merger.o runtime.o inline.o
+weldrt.o: vb.o dict.o gb.o bf.o merger.o runtime.o inline.o
 	ld -r $^ -o $@
 
 ${LIB}: weldrt.o

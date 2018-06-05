@@ -328,3 +328,38 @@ fn simple_dict_exists() {
     assert_eq!(output, result);
 
 }
+
+#[test]
+fn dict_to_keys() {
+    #[allow(dead_code)]
+    struct Args {
+        x: WeldVec<i32>,
+        y: WeldVec<i32>,
+    }
+
+    let code = "|x:vec[i32], y:vec[i32]| let k = keys(result(for(zip(x,y), groupmerger[i32,i32],
+                |b,i,e| merge(b, e)))); sort(k, |e| e)";
+
+    let ref conf = default_conf();
+    let keys = [7, 5, 5, 3, 3, 7];
+    let vals = [2, 3, 4, 1, 0, 2];
+    let ref input_data = Args {
+        x: WeldVec {
+            data: &keys as *const i32,
+            len: keys.len() as i64,
+        },
+        y: WeldVec {
+            data: &vals as *const i32,
+            len: vals.len() as i64,
+        },
+    };
+
+    let ret_value = compile_and_run(code, conf, input_data);
+    let data = ret_value.data() as *const WeldVec<i32>;
+    let result = unsafe { (*data).clone() };
+    let expected = vec![3, 5, 7];
+
+    for i in 0..(expected.len() as isize) {
+        assert_eq!(unsafe { *result.data.offset(i) }, expected[i as usize]);
+    }
+}

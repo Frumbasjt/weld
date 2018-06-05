@@ -143,12 +143,15 @@ impl ExprHash {
                     iter.kind.hash(&mut self.hasher);
                 }
             }
+            SimdWidth(ref kind) => {
+                kind.hash(&mut self.hasher);
+            }
             // Other expressions (listed explicitly so we don't forget to add new ones). If the
             // expression doesn't have a non-Expr field, it goes here.
-            Negate(_) | Broadcast(_) | Serialize(_) | ToVec{ .. } | MakeStruct { .. } | MakeVector { .. } |
+            Negate(_) | Broadcast(_) | Serialize(_) | ToVec{ .. } | Keys { .. } | MakeStruct { .. } | MakeVector { .. } |
                 Zip { .. } | Length { .. } | Lookup { .. } | KeyExists { .. } |
-                Slice { .. } | Sort { .. } | If { .. } | Iterate { .. } | Select { .. } | Apply { .. } |
-                NewBuilder(_) | Merge { .. } | Res { .. } => {}
+                Slice { .. } | StrSlice{ .. } | Sort { .. } | If { .. } | Iterate { .. } | Select { .. } | Apply { .. } |
+                NewBuilder(_) | Merge { .. } | Res { .. } | SwitchFor { .. } | BloomFilterContains { .. } => {}
         }
         if !finished_subexpressions {
             for child in expr.children() {

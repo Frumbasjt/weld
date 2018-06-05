@@ -23,7 +23,21 @@ pub trait Uniquify {
 
 impl Uniquify for Expr {
     fn uniquify(&mut self) -> WeldResult<()> {
-        uniquify_helper(self, &mut SymbolStack::new())
+        let mut symbol_stack = SymbolStack::new();
+        // Push global variables and check that they're defined only once
+        for sym in self.annotations.run_vars().keys() {
+            symbol_stack.push_symbol(sym.clone());
+        }
+        for sym in self.annotations.run_vars().keys() {
+            println!("A");
+            if let Ok(ref new_sym) = symbol_stack.symbol(sym.clone()) {
+                if new_sym.id > 0 {
+                    return compile_err!("Global variable with name {} defined more than once.", sym);
+                }
+            }
+            println!("B");
+        }
+        uniquify_helper(self, &mut symbol_stack)
     }
 }
 
@@ -32,7 +46,7 @@ struct SymbolStack {
     // The symbol stack.
     stack: fnv::FnvHashMap<Symbol, Vec<i32>>,
     // The next unique ID to assign to this name.
-    next_unique_symbol: fnv::FnvHashMap<String, i32>,
+    next_unique_symbol: fnv::FnvHashMap<(String, bool), i32>,
 }
 
 impl SymbolStack {
@@ -53,7 +67,7 @@ impl SymbolStack {
                     .last()
                     .map(|v| *v)
                     .ok_or(WeldCompileError::new(format!("Symbol {} is out of scope", &sym)))?;
-                Ok(Symbol::new(name, id))
+                Ok(Symbol::new(name, id, sym.global))
             }
             _ => compile_err!("Undefined symbol {}", sym),
         }
@@ -64,7 +78,7 @@ impl SymbolStack {
     /// the name. The symbol can be retrieved with `symbol()`.
     fn push_symbol(&mut self, sym: Symbol) {
         let stack_entry = self.stack.entry(sym.clone()).or_insert(Vec::new());
-        let next_entry = self.next_unique_symbol.entry(sym.name).or_insert(-1);
+        let next_entry = self.next_unique_symbol.entry((sym.name, sym.global)).or_insert(-1);
         *next_entry = if sym.id > *next_entry {
             sym.id
         } else {
@@ -88,6 +102,10 @@ impl SymbolStack {
 /// The main helper function for uniquify, which uses `SymbolStack` to track scope and assign
 /// unique names to each symbol. The prerequisite is that each symbol has `id = 0`.
 fn uniquify_helper(expr: &mut Expr, symbol_stack: &mut SymbolStack) -> WeldResult<()> {
+    // Handle annotation expressions first.
+    for mut annot_expr in expr.annotations.exprs_mut() {
+        uniquify_helper(&mut annot_expr, symbol_stack)?;
+    }
     match expr.kind {
         // First, handle expressions which define *new* symbols - Let and Lambda
         Lambda {ref mut params, ref mut body} => {

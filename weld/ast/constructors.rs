@@ -43,7 +43,15 @@ pub fn binop_expr(kind: BinOpKind, left: Expr, right: Expr) -> WeldResult<Expr> 
     if left.ty != right.ty {
         compile_err!("Internal error: Mismatched types in binop_expr")
     } else {
-        let ty = left.ty.clone();
+        let ty = match kind {
+           BinOpKind::Equal | 
+           BinOpKind::NotEqual | 
+           BinOpKind::LessThan | 
+           BinOpKind::LessThanOrEqual | 
+           BinOpKind::GreaterThan | 
+           BinOpKind::GreaterThanOrEqual => Scalar(ScalarKind::Bool),
+            _ => left.ty.clone()
+        };
         new_expr(BinOp {
                      kind: kind,
                      left: Box::new(left),
@@ -92,6 +100,10 @@ pub fn broadcast_expr(expr: Expr) -> WeldResult<Expr> {
     new_expr(Broadcast(Box::new(expr)), ty)
 }
 
+pub fn simdwidth_expr(ty: ScalarKind) -> WeldResult<Expr> {
+    new_expr(SimdWidth(ty), Scalar(ScalarKind::I64))
+}
+
 pub fn tovec_expr(expr: Expr) -> WeldResult<Expr> {
     let ty = if let Dict(ref kt, ref vt) = expr.ty {
         Struct(vec![*kt.clone(), *vt.clone()])
@@ -99,6 +111,15 @@ pub fn tovec_expr(expr: Expr) -> WeldResult<Expr> {
         return compile_err!("Internal error: Mismatched types in tovec_expr");
     };
     new_expr(ToVec { child_expr: Box::new(expr.clone()) }, ty)
+}
+
+pub fn keys_expr(expr: Expr) -> WeldResult<Expr> {
+    let ty = if let Dict(ref kt, _) = expr.ty {
+        *kt.clone()
+    } else {
+        return compile_err!("Internal error: Mismatched types in keys_expr");
+    };
+    new_expr(Keys { child_expr: Box::new(expr.clone()) }, Vector(Box::new(ty)))
 }
 
 pub fn makestruct_expr(exprs: Vec<Expr>) -> WeldResult<Expr> {
@@ -182,6 +203,13 @@ pub fn keyexists_expr(data: Expr, key: Expr) -> WeldResult<Expr> {
              Scalar(ScalarKind::Bool))
 }
 
+pub fn bloomfiltercontains_expr(bf: Expr, item: Expr) -> WeldResult<Expr> {
+    new_expr(BloomFilterContains {
+        bf: Box::new(bf),
+        item: Box::new(item)
+    }, Scalar(ScalarKind::Bool))
+}
+
 pub fn slice_expr(data: Expr, index: Expr, size: Expr) -> WeldResult<Expr> {
     let mut type_checked = 0;
 
@@ -206,6 +234,29 @@ pub fn slice_expr(data: Expr, index: Expr, size: Expr) -> WeldResult<Expr> {
                  data: Box::new(data),
                  index: Box::new(index),
                  size: Box::new(size),
+             },
+             ty)
+}
+
+pub fn strslice_expr(data: Expr, offset: Expr) -> WeldResult<Expr> {
+    let mut type_checked = 0;
+
+    if let Vector(_) = data.ty {
+        type_checked += 1;
+    }
+
+    if let Scalar(ScalarKind::I64) = offset.ty {
+        type_checked += 1;
+    }
+
+    if type_checked != 2 {
+        return compile_err!("Internal error: Mismatched types in strslice_expr");
+    }
+
+    let ty = data.ty.clone();
+    new_expr(StrSlice {
+                 data: Box::new(data),
+                 offset: Box::new(offset),
              },
              ty)
 }
@@ -325,49 +376,84 @@ pub fn cudf_expr(sym_name: String, args: Vec<Expr>, return_ty: Type) -> WeldResu
              return_ty)
 }
 
-pub fn newbuilder_expr(kind: BuilderKind, expr: Option<Expr>) -> WeldResult<Expr> {
+pub fn newbuilder_expr(kind: BuilderKind, args: Vec<Expr>) -> WeldResult<Expr> {
     let passed = match kind {
         Merger(ref ty, _) => {
             let mut passed = false;
-            if let Some(ref e) = expr {
-                if &e.ty == ty.as_ref() {
+            if args.len() == 1 {
+                if &args[0].ty == ty.as_ref() {
                     passed = true;
                 }
-            } else {
-                // Argument is optional.
+            } else if args.len() == 0 {
+                // Argument is optional
                 passed = true;
             }
+            // if let Some(ref e) = expr {
+            //     if &e.ty == ty.as_ref() {
+            //         passed = true;
+            //     }
+            // } else {
+            //     // Argument is optional.
+            //     passed = true;
+            // }
             passed
         }
         VecMerger(ref ty, _) => {
             let mut passed = false;
-            if let Some(ref e) = expr {
-                if let Vector(ref elem_ty) = e.ty {
-                    if elem_ty == ty {
+            if args.len() == 1 {
+                if let Vector(ref elem_ty) = args[0].ty {
+                    passed = elem_ty == ty;
+                }
+            }
+            // if let Some(ref e) = expr {
+            //     if let Vector(ref elem_ty) = e.ty {
+            //         if elem_ty == ty {
+            //             passed = true;
+            //         }
+            //     }
+            // }
+            passed
+        }
+        Appender(_) => {
+            let mut passed = false;
+            if args.len() == 1 {
+                if let Scalar(ScalarKind::I64) = args[0].ty {
+                    passed = true;
+                }
+            } else if args.len() == 0 {
+                passed = true;
+            }
+            // if let Some(ref e) = expr {
+            //     if let Scalar(ScalarKind::I64) = e.ty {
+            //         passed = true;
+            //     }
+            // } else {
+            //     // Argument is optional.
+            //     passed = true;
+            // }
+            passed
+        }
+        BloomBuilder(_) => {
+            let mut passed = false;
+            if 0 < args.len() && args.len() < 3 {
+                if let Scalar(ScalarKind::I64) = args[0].ty {
+                    if args.len() > 1 {
+                    // TODO: implement this argument
+                    } else {
                         passed = true;
                     }
                 }
             }
             passed
         }
-        Appender(_) => {
-            let mut passed = false;
-            if let Some(ref e) = expr {
-                if let Scalar(ScalarKind::I64) = e.ty {
-                    passed = true;
-                }
-            }
-            passed
-        }
-        _ => expr.is_none(),
+        _ => args.len() == 0,
     };
 
     if !passed {
         return compile_err!("Internal error: Mismatched types in newbuilder_expr");
     }
 
-    new_expr(NewBuilder(expr.map(|e| Box::new(e))),
-             Builder(kind, Annotations::new()))
+    new_expr(NewBuilder(args), Builder(kind, Annotations::new()))
 }
 
 // TODO - the vectorized flag is temporary!
@@ -456,11 +542,78 @@ pub fn for_expr(iters: Vec<Iter>, builder: Expr, func: Expr, vectorized: bool) -
              builder_ty)
 }
 
+/// Generates a switch for expression containing the given fors. The switch for expression is
+/// preceded by a let expression defining the common builder for all fors, and the builder in every
+/// for is replaced with a corresponding identity expression.
+pub fn switchfor_expr(mut fors: Vec<Expr>, 
+                      annotations: Vec<Annotations>, 
+                      bld_sym: Symbol, 
+                      lb_sym: Symbol, 
+                      ub_sym: Symbol) -> WeldResult<Expr> {
+
+    if fors.len() == 0 {
+        return compile_err!("Internal error: Empty list of fors in switchfor_expr");
+    }
+
+    for pfor in fors.iter() {
+        match pfor.kind {
+            For { .. } => {},
+            _ => return compile_err!("Internal error: Non-for kind in switchfor_expr")
+        }
+    }
+
+    let first_for = fors[0].clone();
+    let ty = first_for.ty.clone();
+
+    if let For { builder: ref first_builder, .. } = first_for.kind {
+        for pfor in fors.iter_mut() {
+            if let For { ref builder, .. } = pfor.kind {
+                if builder != first_builder {
+                    return compile_err!("Internal error: Non matching builders in fors in switchfor_expr");
+                }
+            }
+        }
+        
+        for pfor in fors.iter_mut() {
+            if let For { ref mut builder , .. } = pfor.kind {
+                *builder = Box::new(ident_expr(bld_sym.clone(), builder.ty.clone()).unwrap());
+            }
+        }
+
+        let mut lambdas = vec![];
+        for (pfor, annot) in fors.iter().zip(annotations.iter()) {
+            let params = vec![
+                    Parameter {
+                        name: lb_sym.clone(),
+                        ty: Scalar(ScalarKind::I64)
+                    },
+                    Parameter {
+                        name: ub_sym.clone(),
+                        ty: Scalar(ScalarKind::I64)
+                    }
+            ];
+            let mut lambda = lambda_expr(params, pfor.clone()).unwrap();
+            lambda.annotations = annot.clone();
+            lambdas.push(lambda);
+        }
+
+        let sf = new_expr(SwitchFor { fors: lambdas }, ty).unwrap();
+        return let_expr(bld_sym.clone(), *first_builder.clone(), sf);
+    }
+
+    unreachable!();
+}
+
 pub fn merge_expr(builder: Expr, value: Expr) -> WeldResult<Expr> {
     let err = compile_err!("Internal error: Mismatched types in merge_expr");
     if let Builder(ref bk, _) = builder.ty {
         match *bk {
             Appender(ref elem_ty) => {
+                if elem_ty.as_ref() != &value.ty {
+                    return err;
+                }
+            }
+            BloomBuilder(ref elem_ty) => {
                 if elem_ty.as_ref() != &value.ty {
                     return err;
                 }
@@ -533,6 +686,7 @@ pub fn result_expr(builder: Expr) -> WeldResult<Expr> {
             DictMerger(ref kt, ref vt, _) => Dict(kt.clone(), vt.clone()),
             GroupMerger(ref kt, ref vt) => Dict(kt.clone(), Box::new(Vector(vt.clone()))),
             VecMerger(ref elem_ty, _) => Vector(elem_ty.clone()),
+            BloomBuilder(ref elem_ty) => BloomFilter(elem_ty.clone())
         }
     } else {
         return err;
@@ -572,7 +726,7 @@ fn builder_exprs_test() {
     let bk = BuilderKind::Merger(Box::new(Scalar(ScalarKind::I32)), BinOpKind::Add);
     let builder_type = Builder(bk.clone(), Annotations::new());
 
-    let builder = newbuilder_expr(bk.clone(), None).unwrap();
+    let builder = newbuilder_expr(bk.clone(), vec![]).unwrap();
     assert_eq!(builder.ty, builder_type);
 
     let i32_literal = literal_expr(LiteralKind::I32Literal(5)).unwrap();
@@ -600,15 +754,15 @@ fn builder_exprs_test() {
 
     // Create a list of params for the for loop's function.
     let params = vec![Parameter {
-                          name: Symbol::new("b", 0),
+                          name: Symbol::new("b", 0, false),
                           ty: builder_type.clone(),
                       },
                       Parameter {
-                          name: Symbol::new("i", 0),
+                          name: Symbol::new("i", 0, false),
                           ty: Scalar(ScalarKind::I64),
                       },
                       Parameter {
-                          name: Symbol::new("e", 0),
+                          name: Symbol::new("e", 0, false),
                           ty: i32_literal.ty.clone(),
                       }];
 

@@ -12,6 +12,7 @@ use super::transforms::short_circuit;
 use super::transforms::annotator;
 use super::transforms::vectorizer;
 use super::transforms::unroller;
+use super::transforms::adaptive;
 
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ pub type PassFn = fn(&mut Expr);
 pub struct Transformation {
     pub func: PassFn,
     pub experimental: bool,
+    pub adaptive: bool,
 }
 
 impl Transformation {
@@ -29,6 +31,7 @@ impl Transformation {
         Transformation {
             func: func,
             experimental: false,
+            adaptive: false,
         }
     }
 
@@ -36,6 +39,23 @@ impl Transformation {
         Transformation {
             func: func,
             experimental: true,
+            adaptive: false,
+        }
+    }
+
+    pub fn new_adaptive(func: PassFn) -> Transformation {
+        Transformation {
+            func: func,
+            experimental: false,
+            adaptive: true,
+        }
+    }
+
+    pub fn new_experiment_adaptive(func: PassFn) -> Transformation {
+        Transformation {
+            func: func,
+            experimental: true,
+            adaptive: true,
         }
     }
 }
@@ -54,7 +74,8 @@ impl Pass {
         }
     }
 
-    pub fn transform(&self, mut expr: &mut Expr, use_experimental: bool) -> WeldResult<()> {
+    pub fn transform(&self, mut expr: &mut Expr, use_experimental: bool, use_adaptive: bool) -> WeldResult<bool> {
+        let mut changed = false;
         let mut continue_pass = true;
         let mut before = expr.hash_ignoring_symbols()?;
         while continue_pass {
@@ -63,13 +84,18 @@ impl Pass {
                 if transform.experimental && !use_experimental {
                     continue;
                 }
+                // Skip micro-adaptive transformations unless the flag is explicitly set.
+                if transform.adaptive && !use_adaptive {
+                    continue;
+                }
                 (transform.func)(&mut expr);
             }
             let after = expr.hash_ignoring_symbols()?;
             continue_pass = !(before == after);
+            changed |= continue_pass;
             before = after;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn pass_name(&self) -> String {
@@ -121,6 +147,15 @@ lazy_static! {
         m.insert("fix-iterate",
                  Pass::new(vec![Transformation::new(annotator::force_iterate_parallel_fors)],
                  "fix-iterate"));
+        m.insert("adapt-reorder-filter-projection",
+                 Pass::new(vec![Transformation::new_adaptive(adaptive::reorder_filter_projection)],
+                 "adapt-reorder-filter-projection"));
+        m.insert("adapt-bloomfilter",
+                 Pass::new(vec![Transformation::new_adaptive(adaptive::adaptive_bloomfilter)],
+                 "adapt-bloomfilter"));
+        m.insert("adaptive",
+                 Pass::new(vec![Transformation::new_adaptive(adaptive::adaptive)],
+                 "adaptive"));
         m
     };
 }

@@ -8,3 +8,4 @@ pub mod annotator;
 pub mod vectorizer;
 pub mod short_circuit;
 pub mod unroller;
+pub mod adaptive;

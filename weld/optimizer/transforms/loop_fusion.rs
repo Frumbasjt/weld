@@ -152,7 +152,7 @@ pub fn fuse_loops_horizontal(expr: &mut Expr) {
                         ty: Vector(Box::new(merge_type.clone())),
                         kind: Res{builder: Box::new(Expr{
                             ty: builder_type.clone(),
-                            kind: For{iters: common_data.unwrap(), builder: Box::new(Expr{ty: builder_type.clone(), kind: NewBuilder(None), annotations: Annotations::new()}), func: Box::new(new_func)},
+                            kind: For{iters: common_data.unwrap(), builder: Box::new(Expr{ty: builder_type.clone(), kind: NewBuilder(vec![]), annotations: Annotations::new()}), func: Box::new(new_func)},
                             annotations: Annotations::new(),
                         })},
                         annotations: Annotations::new(),

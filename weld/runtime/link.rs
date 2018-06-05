@@ -4,9 +4,15 @@
 //! resolve them unless they are marked with `pub`.
 
 use libc::{c_void, int64_t, int32_t, size_t};
+use codegen::llvm;
+use sir;
+use WeldModule;
 
 #[allow(non_camel_case_types)]
-type work_t = c_void;
+pub type work_t = c_void;
+
+#[allow(non_camel_case_types)]
+type flavor_t = c_void;
 
 #[allow(non_camel_case_types)]
 type vec_piece = c_void;
@@ -15,6 +21,13 @@ type vec_piece = c_void;
 pub struct vec_output {
     data: *mut c_void,
     size: i64,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn weld_rt_compile_func(module: *mut WeldModule, func_id: int32_t) -> (extern "C" fn(*mut work_t) -> ()) {
+    // TODO: better error handling
+    let mut module_ref = &mut *module;
+    llvm::compile_lazy_function(&mut module_ref.llvm_module, func_id as sir::FunctionId).unwrap()
 }
 
 #[link(name="weldrt", kind="static")]
@@ -39,6 +52,15 @@ extern "C" {
                               upper: int64_t,
                               grain_size: int32_t);
     #[no_mangle]
+    pub fn weld_rt_start_switch(w: *mut work_t,
+                                flavors: *mut flavor_t,
+                                cont_data: *mut c_void,
+                                cont: extern "C" fn(*mut work_t),
+                                lower: int64_t,
+                                upper: int64_t,
+                                grain_size: int32_t,
+                                flavor_count: int32_t);
+    #[no_mangle]
     pub fn weld_rt_set_result(res: *mut c_void);
     #[no_mangle]
     pub fn weld_rt_new_vb(elem_size: int64_t, starting_cap: int64_t, fixed_size: int32_t) -> *mut c_void;
@@ -57,7 +79,8 @@ extern "C" {
     #[no_mangle]
     pub fn weld_rt_free_merger(m: *mut c_void);
     #[no_mangle]
-    pub fn weld_run_begin(run: extern "C" fn(*mut work_t), mem_limit: int64_t, n_workers: int32_t) -> int64_t;
+    pub fn weld_run_begin(run: extern "C" fn(*mut work_t), mem_limit: int64_t, n_workers: int32_t,
+        module: *mut c_void, explore_period: int32_t, explore_length: int32_t, exploit_period: int32_t) -> int64_t;
     #[no_mangle]
     pub fn weld_run_get_result(run_id: int64_t) -> *mut c_void;
     #[no_mangle]
@@ -98,6 +121,8 @@ extern "C" {
     pub fn weld_rt_dict_to_array(d: *mut c_void, value_offset_in_struct: int32_t,
         struct_size: int32_t) -> *mut c_void;
     #[no_mangle]
+    pub fn weld_rt_dict_keys_to_array(d: *mut c_void) -> *mut c_void;
+    #[no_mangle]
     pub fn weld_rt_dict_size(d: *mut c_void) -> int64_t;
     #[no_mangle]
     pub fn weld_rt_dict_serialize(d: *mut c_void,
@@ -117,4 +142,22 @@ extern "C" {
     pub fn weld_rt_gb_result(b: *mut c_void) -> *mut c_void;
     #[no_mangle]
     pub fn weld_rt_gb_free(gb: *mut c_void);
+    #[no_mangle]
+    pub fn weld_rt_bf_new(num_items: int64_t);
+    #[no_mangle]
+    pub fn weld_rt_bf_add(bf: *mut c_void, item: int32_t);
+    #[no_mangle]
+    pub fn weld_rt_bf_contains(bf: *mut c_void, item: int32_t);
+    #[no_mangle]
+    pub fn weld_rt_bf_free(bf: *mut c_void);
+    #[no_mangle]
+    pub fn weld_rt_defer_build(id: int32_t, 
+                               condition: extern "C" fn(*mut u8),
+                               build: extern "C" fn(*mut work_t),
+                               build_params: *mut c_void,
+                               depends_on: *mut *mut c_void);
+    #[no_mangle]
+    pub fn weld_rt_get_defered_result(id: int32_t) -> *mut c_void;
+    #[no_mangle]
+    pub fn weld_rt_set_defered_result(id: int32_t, result: *mut c_void);
 }

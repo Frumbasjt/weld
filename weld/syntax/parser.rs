@@ -96,6 +96,34 @@ impl<'t> Parser<'t> {
         &self.tokens[self.position]
     }
 
+    // Look at a token with some offset from the next token to be parsed.
+    fn peek_at(&self, offset: usize) -> &'t Token {
+        &self.tokens[self.position + offset]
+    }
+
+    // Look at the next token to be parsed, but ignore anything that belongs to an annotation.
+    fn peek_ignore_annotations(&mut self) -> &'t Token {
+        let old_pos = self.position;
+        let mut peek = self.peek();
+
+        if *self.next() == TAtMark {
+            if *self.next() == TOpenParen {
+                let mut parens_open = 1;
+                while parens_open > 0 {
+                    let next = self.next();
+                    if next == &TOpenParen {
+                        parens_open += 1;
+                    } else if next == &TCloseParen {
+                        parens_open -= 1;
+                    }
+                }
+                peek = self.peek();
+            }
+        }
+        self.position = old_pos;
+        return peek;
+    }
+
     /// Returns a string representing a context in the input.
     fn error_context(&self) -> String {
         let length = 10;
@@ -172,11 +200,11 @@ impl<'t> Parser<'t> {
     /// Parse a single macro starting at the current position.
     fn macro_(&mut self) -> WeldResult<Macro> {
         try!(self.consume(TMacro));
-        let name = try!(self.symbol());
+        let name = try!(self.symbol(false));
         let mut params: Vec<Symbol> = Vec::new();
         try!(self.consume(TOpenParen));
         while *self.peek() != TCloseParen {
-            params.push(try!(self.symbol()));
+            params.push(try!(self.symbol(false)));
             if *self.peek() == TComma {
                 self.next();
             } else if *self.peek() != TCloseParen {
@@ -196,22 +224,26 @@ impl<'t> Parser<'t> {
 
     /// Parse an expression starting at the current position.
     fn expr(&mut self) -> WeldResult<Box<Expr>> {
-        if *self.peek() == TLet {
+        let peek = self.peek_ignore_annotations();
+        if peek == &TLet {
             self.let_expr()
-        } else if *self.peek() == TBar || *self.peek() == TLogicalOr {
+        } else if peek == &TBar || peek == &TLogicalOr {
             self.lambda_expr()
         } else {
-            self.operator_expr()
+            self.operator_expr(false)
         }
     }
 
     /// Parse 'let name = value; body' starting at the current position.
     fn let_expr(&mut self) -> WeldResult<Box<Expr>> {
+        let mut annotations = Annotations::new();
+        try!(self.parse_annotations(&mut annotations));
+
         try!(self.consume(TLet));
-        let name = try!(self.symbol());
+        let name = try!(self.symbol(false));
         let ty = try!(self.optional_type());
         try!(self.consume(TEqual));
-        let mut value = try!(self.operator_expr());
+        let mut value = try!(self.operator_expr(false));
 
         // If a type was found, assign it (even if the value already has a known type).
         // Type inference will catch any type mismatches later on.
@@ -226,18 +258,21 @@ impl<'t> Parser<'t> {
                                     value: value,
                                     body: body,
                                 },
-                                Annotations::new());
+                                annotations);
         Ok(expr)
     }
 
     /// Parse '|params| body' starting at the current position.
     fn lambda_expr(&mut self) -> WeldResult<Box<Expr>> {
+        let mut annotations = Annotations::new();
+        try!(self.parse_annotations(&mut annotations));
+
         let mut params: Vec<Parameter> = Vec::new();
         // The next token could be either '||' if there are no params, or '|' if there are some.
         let token = self.next();
         if *token == TBar {
             while *self.peek() != TBar {
-                let name = try!(self.symbol());
+                let name = try!(self.symbol(false));
                 let ty = try!(self.optional_type());
                 params.push(Parameter { name: name, ty: ty });
                 if *self.peek() == TComma {
@@ -255,20 +290,20 @@ impl<'t> Parser<'t> {
                         params: params,
                         body: body,
                     },
-                    Annotations::new()))
+                    annotations))
     }
 
     /// Parse an expression involving operators (||, &&, +, -, etc down the precedence chain)
-    fn operator_expr(&mut self) -> WeldResult<Box<Expr>> {
-        self.logical_or_expr()
+    fn operator_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        self.logical_or_expr(is_global)
     }
 
     /// Parse a logical or expression with terms separated by || (for operator precedence).
-    fn logical_or_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.logical_and_expr());
+    fn logical_or_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.logical_and_expr(is_global));
         while *self.peek() == TLogicalOr {
             self.consume(TLogicalOr)?;
-            let right = try!(self.logical_and_expr());
+            let right = try!(self.logical_and_expr(is_global));
             res = expr_box(BinOp {
                                kind: LogicalOr,
                                left: res,
@@ -280,11 +315,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a logical and expression with terms separated by && (for operator precedence).
-    fn logical_and_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.bitwise_or_expr());
+    fn logical_and_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.bitwise_or_expr(is_global));
         while *self.peek() == TLogicalAnd {
             self.consume(TLogicalAnd)?;
-            let right = try!(self.bitwise_or_expr());
+            let right = try!(self.bitwise_or_expr(is_global));
             res = expr_box(BinOp {
                                kind: LogicalAnd,
                                left: res,
@@ -296,11 +331,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a bitwise or expression with terms separated by | (for operator precedence).
-    fn bitwise_or_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.xor_expr());
+    fn bitwise_or_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.xor_expr(is_global));
         while *self.peek() == TBar {
             self.consume(TBar)?;
-            let right = try!(self.xor_expr());
+            let right = try!(self.xor_expr(is_global));
             res = expr_box(BinOp {
                                kind: BitwiseOr,
                                left: res,
@@ -312,11 +347,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a bitwise or expression with terms separated by ^ (for operator precedence).
-    fn xor_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.bitwise_and_expr());
+    fn xor_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.bitwise_and_expr(is_global));
         while *self.peek() == TXor {
             self.consume(TXor)?;
-            let right = try!(self.bitwise_and_expr());
+            let right = try!(self.bitwise_and_expr(is_global));
             res = expr_box(BinOp {
                                kind: Xor,
                                left: res,
@@ -328,11 +363,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a bitwise and expression with terms separated by & (for operator precedence).
-    fn bitwise_and_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.equality_expr());
+    fn bitwise_and_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.equality_expr(is_global));
         while *self.peek() == TBitwiseAnd {
             self.consume(TBitwiseAnd)?;
-            let right = try!(self.equality_expr());
+            let right = try!(self.equality_expr(is_global));
             res = expr_box(BinOp {
                                kind: BitwiseAnd,
                                left: res,
@@ -344,12 +379,12 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse an == or != expression (for operator precedence).
-    fn equality_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.comparison_expr());
+    fn equality_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.comparison_expr(is_global));
         // Unlike other expressions, we only allow one operator here; prevents stuff like a==b==c
         if *self.peek() == TEqualEqual || *self.peek() == TNotEqual {
             let token = self.next();
-            let right = try!(self.comparison_expr());
+            let right = try!(self.comparison_expr(is_global));
             if *token == TEqualEqual {
                 res = expr_box(BinOp {
                                    kind: Equal,
@@ -370,8 +405,8 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a <, >, <= or >= expression (for operator precedence).
-    fn comparison_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.sum_expr());
+    fn comparison_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.sum_expr(is_global));
         // Unlike other expressions, we only allow one operator here; prevents stuff like a>b>c
         if *self.peek() == TLessThan || *self.peek() == TLessThanOrEqual ||
            *self.peek() == TGreaterThan || *self.peek() == TGreaterThanOrEqual {
@@ -381,7 +416,7 @@ impl<'t> Parser<'t> {
                 TLessThanOrEqual => LessThanOrEqual,
                 _ => GreaterThanOrEqual,
             };
-            let right = try!(self.sum_expr());
+            let right = try!(self.sum_expr(is_global));
             res = expr_box(BinOp {
                                kind: op,
                                left: res,
@@ -393,11 +428,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a sum expression with terms separated by + and - (for operator precedence).
-    fn sum_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.product_expr());
+    fn sum_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.product_expr(is_global));
         while *self.peek() == TPlus || *self.peek() == TMinus {
             let token = self.next();
-            let right = try!(self.product_expr());
+            let right = try!(self.product_expr(is_global));
             if *token == TPlus {
                 res = expr_box(BinOp {
                                    kind: Add,
@@ -418,15 +453,15 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a product expression with terms separated by *, / and % (for precedence).
-    fn product_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut res = try!(self.ascribe_expr());
+    fn product_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut res = try!(self.ascribe_expr(is_global));
         while *self.peek() == TTimes || *self.peek() == TDivide || *self.peek() == TModulo {
             let op = match *self.next() {
                 TTimes => Multiply,
                 TDivide => Divide,
                 _ => Modulo,
             };
-            let right = try!(self.ascribe_expr());
+            let right = try!(self.ascribe_expr(is_global));
             res = expr_box(BinOp {
                                kind: op,
                                left: res,
@@ -438,8 +473,8 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a type abscription expression such as 'e: T', or lower-level ones in precedence.
-    fn ascribe_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut expr = try!(self.apply_expr());
+    fn ascribe_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut expr = try!(self.apply_expr(is_global));
         if *self.peek() == TColon {
             expr.ty = try!(self.optional_type());
         }
@@ -447,8 +482,8 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse application chain expression such as a.0().3().
-    fn apply_expr(&mut self) -> WeldResult<Box<Expr>> {
-        let mut expr = try!(self.leaf_expr());
+    fn apply_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
+        let mut expr = try!(self.leaf_expr(is_global));
         while *self.peek() == TDot || *self.peek() == TOpenParen {
             if *self.next() == TDot {
                 match *self.next() {
@@ -600,7 +635,7 @@ impl<'t> Parser<'t> {
 
     /// Parses annotations in the format "@(<annotation name>: <annotation value>,...)".
     fn parse_annotations(&mut self, annotations: &mut Annotations) -> WeldResult<()> {
-        if *self.peek() == TAtMark {
+        if *self.peek() == TAtMark && *self.peek_at(1) == TOpenParen {
             self.consume(TAtMark)?;
             try!(self.consume(TOpenParen));
             while *self.peek() != TCloseParen {
@@ -694,6 +729,59 @@ impl<'t> Parser<'t> {
                                     return compile_err!("Invalid number of keys (must be a i64)");
                                 }
                             }
+                            "run_vars" => {
+                                self.consume(TIdent("run_vars".to_string()))?;
+                                try!(self.consume(TColon));
+
+                                let sym = try!(self.symbol(true));
+                                try!(self.consume(TEqual));
+                                let expr = try!(self.operator_expr(true));
+                                annotations.push_run_var(sym, *expr);
+                                
+                                while *self.peek() == TSemicolon {
+                                    try!(self.consume(TSemicolon));
+                                    let sym = try!(self.symbol(true));
+                                    try!(self.consume(TEqual));
+                                    let expr = try!(self.operator_expr(true));
+                                    annotations.push_run_var(sym, *expr);
+                                }
+                            }
+                            "count_calls" => {
+                                self.consume(TIdent("count_calls".to_string()))?;
+                                try!(self.consume(TColon));
+                                let expr = try!(self.leaf_expr(true));
+                                annotations.set_count_calls(expr);
+                            }
+                            "defered_until" => {
+                                self.consume(TIdent("defered_until".to_string()))?;
+                                try!(self.consume(TColon));
+                                let expr = try!(self.operator_expr(true));
+                                annotations.set_defered_until(expr);
+                            }
+                            "switch_instrumented" => {
+                                self.consume(TIdent("switch_instrumented".to_string()))?;
+                                try!(self.consume(TColon));
+
+                                let mut globals = vec![];
+                                globals.push(*try!(self.leaf_expr(true)));
+                                while *self.peek() == TComma {
+                                    try!(self.consume(TComma));
+                                    globals.push(*try!(self.leaf_expr(true)));
+                                }
+                                annotations.set_switch_instrumented(globals);
+                            }
+                            "switch_if_initialized" => {
+                                self.consume(TIdent("switch_if_initialized".to_string()))?;
+                                try!(self.consume(TColon));
+
+                                let mut ids = vec![];
+                                ids.push(*try!(self.leaf_expr(false)));
+                                while *self.peek() == TComma {
+                                    try!(self.consume(TComma));
+                                    ids.push(*try!(self.leaf_expr(false)));
+                                }
+                                annotations.set_switch_if_initialized(ids);
+                            }
                             _ => return compile_err!("Invalid annotation type"),
                         }
                     }
@@ -747,7 +835,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a terminal expression at the bottom of the precedence chain.
-    fn leaf_expr(&mut self) -> WeldResult<Box<Expr>> {
+    fn leaf_expr(&mut self, is_global: bool) -> WeldResult<Box<Expr>> {
         let mut annotations = Annotations::new();
         try!(self.parse_annotations(&mut annotations));
 
@@ -781,12 +869,31 @@ impl<'t> Parser<'t> {
                 Ok(expr_box(ToVec { child_expr: child_expr }, Annotations::new()))
             }
 
+            TKeys => {
+                try!(self.consume(TOpenParen));
+                let child_expr = try!(self.expr());
+                try!(self.consume(TCloseParen));
+                Ok(expr_box(Keys { child_expr: child_expr }, Annotations::new()))
+            }
+
+            TAtMark => {
+                if is_global {
+                    if let TIdent(ref name) = *self.next() {
+                        Ok(expr_box(Ident(Symbol::name(name, true)), Annotations::new()))
+                    } else {
+                        compile_err!("Expected identifier")
+                    }
+                } else {
+                    compile_err!("No global identifiers allowed in local scope")
+                }
+            }
+
             TIdent(ref name) => {
-                Ok(expr_box(Ident(Symbol {
-                                      name: name.clone(),
-                                      id: 0,
-                                  }),
-                            Annotations::new()))
+                if !is_global {
+                    Ok(expr_box(Ident(Symbol::name(name, false)), Annotations::new()))
+                } else {
+                    compile_err!("No local identifiers allowed in global scope")
+                }
             }
 
             TOpenParen => {
@@ -903,7 +1010,7 @@ impl<'t> Parser<'t> {
             TCUDF => {
                 let mut args = vec![];
                 try!(self.consume(TOpenBracket));
-                let sym_name = try!(self.symbol());
+                let sym_name = try!(self.symbol(is_global));
                 try!(self.consume(TComma));
                 let return_ty = try!(self.type_());
                 try!(self.consume(TCloseBracket));
@@ -974,6 +1081,33 @@ impl<'t> Parser<'t> {
                             annotations))
             }
 
+            TSwitchFor => {
+                try!(self.consume(TOpenParen));
+                let mut fors = vec![];
+                fors.push(*try!(self.expr()));
+                while *self.peek() == TComma {
+                    try!(self.consume(TComma));
+                    fors.push(*try!(self.expr()));
+                }
+                try!(self.consume(TCloseParen));
+                Ok(expr_box(SwitchFor { fors: fors }, annotations))
+            }
+
+            TSimdWidth => {
+                try!(self.consume(TOpenParen));
+
+                let ty = try!(self.type_());
+                let kind = if let Scalar(ref kind) = ty {
+                    *kind
+                } else {
+                    return compile_err!("Expected scalar type in simdwidth")
+                };
+
+                try!(self.consume(TCloseParen));
+
+                Ok(expr_box(SimdWidth(kind), Annotations::new()))
+            }
+
             TLen => {
                 try!(self.consume(TOpenParen));
                 let data = try!(self.expr());
@@ -991,7 +1125,7 @@ impl<'t> Parser<'t> {
                                 data: data,
                                 index: index,
                             },
-                            Annotations::new()))
+                            annotations))
             }
 
             TKeyExists => {
@@ -1004,7 +1138,7 @@ impl<'t> Parser<'t> {
                                 data: data,
                                 key: key,
                             },
-                            Annotations::new()))
+                            annotations))
             }
 
             TSlice => {
@@ -1019,6 +1153,19 @@ impl<'t> Parser<'t> {
                                 data: data,
                                 index: index,
                                 size: size,
+                            },
+                            Annotations::new()))
+            }
+
+            TStrSlice => {
+                try!(self.consume(TOpenParen));
+                let data = try!(self.expr());
+                try!(self.consume(TComma));
+                let offset = try!(self.expr());
+                try!(self.consume(TCloseParen));
+                Ok(expr_box(StrSlice {
+                                data: data,
+                                offset: offset,
                             },
                             Annotations::new()))
             }
@@ -1059,7 +1206,7 @@ impl<'t> Parser<'t> {
                                 builder: builder,
                                 value: value,
                             },
-                            Annotations::new()))
+                            annotations))
             }
 
             TResult => {
@@ -1081,9 +1228,9 @@ impl<'t> Parser<'t> {
                     self.consume(TOpenParen)?;
                     let arg = self.expr()?;
                     self.consume(TCloseParen)?;
-                    Some(arg)
+                    vec![*arg]
                 } else {
-                    None
+                    vec![]
                 };
 
                 let mut expr = expr_box(NewBuilder(arg), Annotations::new());
@@ -1099,10 +1246,10 @@ impl<'t> Parser<'t> {
                 let bin_op = self.commutative_binop_()?;
                 self.consume(TCloseBracket)?;
 
-                let mut value = None;
+                let mut value = vec![];
                 if *self.peek() == TOpenParen {
                     self.consume(TOpenParen)?;
-                    value = Some(self.expr()?);
+                    value.push(*self.expr()?);
                     self.consume(TCloseParen)?;
                 }
 
@@ -1122,16 +1269,16 @@ impl<'t> Parser<'t> {
                 let bin_op = self.commutative_binop_()?;
                 try!(self.consume(TCloseBracket));
 
-                let arg = if *self.peek() == TOpenParen {
+                let args = if *self.peek() == TOpenParen {
                     self.consume(TOpenParen)?;
-                    let arg = self.expr()?;
+                    let arg = *self.expr()?;
                     self.consume(TCloseParen)?;
-                    Some(arg)
+                    vec![arg]
                 } else {
-                    None
+                    vec![]
                 };
 
-                let mut expr = expr_box(NewBuilder(arg), Annotations::new());
+                let mut expr = expr_box(NewBuilder(args), Annotations::new());
                 expr.ty = Builder(DictMerger(Box::new(key_type.clone()),
                                              Box::new(value_type.clone()),
                                              bin_op),
@@ -1148,7 +1295,7 @@ impl<'t> Parser<'t> {
                 try!(self.consume(TComma));
                 value_type = try!(self.type_());
                 try!(self.consume(TCloseBracket));
-                let mut expr = expr_box(NewBuilder(None), Annotations::new());
+                let mut expr = expr_box(NewBuilder(vec![]), Annotations::new());
                 expr.ty = Builder(GroupMerger(Box::new(key_type.clone()),
                                               Box::new(value_type.clone())),
                                   annotations);
@@ -1166,14 +1313,28 @@ impl<'t> Parser<'t> {
                 let expr = self.expr()?;
                 self.consume(TCloseParen)?;
 
-                let mut expr = expr_box(NewBuilder(Some(expr)), Annotations::new());
+                let mut expr = expr_box(NewBuilder(vec![*expr]), Annotations::new());
                 expr.ty = Builder(VecMerger(Box::new(elem_type.clone()),
                                             bin_op),
                                   annotations);
                 Ok(expr)
             }
 
-            TMinus => Ok(expr_box(Negate(try!(self.leaf_expr())), Annotations::new())),
+            TBloomBuilder => {
+                try!(self.consume(TOpenBracket));
+                let elem_ty = try!(self.type_());
+                try!(self.consume(TCloseBracket));
+                try!(self.consume(TOpenParen));
+                let capacity = try!(self.expr());
+                try!(self.consume(TCloseParen));
+
+                let mut expr = expr_box(NewBuilder(vec![*capacity]), Annotations::new());
+                expr.ty = Builder(BloomBuilder(Box::new(elem_ty.clone())), annotations);
+
+                Ok(expr)
+            }
+
+            TMinus => Ok(expr_box(Negate(try!(self.leaf_expr(is_global))), Annotations::new())),
 
             TMin => {
                 try!(self.consume(TOpenParen));
@@ -1222,18 +1383,32 @@ impl<'t> Parser<'t> {
                 Ok(res)
             }
             
+            TBfContains => {
+                try!(self.consume(TOpenParen));
+                let bf = try!(self.expr());
+                try!(self.consume(TComma));
+                let item = try!(self.expr());
+                try!(self.consume(TCloseParen));
+
+                let res = expr_box(BloomFilterContains {
+                    bf: bf,
+                    item: item
+                }, Annotations::new());
+                Ok(res)
+            }
+
             ref other => compile_err!("Expected expression but got '{}'", other),
         }
     }
 
     /// Parse a symbol starting at the current input position.
-    fn symbol(&mut self) -> WeldResult<Symbol> {
+    fn symbol(&mut self, global: bool) -> WeldResult<Symbol> {
+        if global {
+            self.consume(TAtMark)?;
+        }
         match *self.next() {
             TIdent(ref name) => {
-                Ok(Symbol {
-                       name: name.clone(),
-                       id: 0,
-                   })
+                Ok(Symbol::name(name, global))
             }
             ref other => compile_err!("Expected identifier but got '{}'", other),
         }

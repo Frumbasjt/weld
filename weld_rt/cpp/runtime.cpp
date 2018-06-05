@@ -11,6 +11,13 @@
 #include <exception>
 #include "assert.h"
 #include "runtime.h"
+#include <limits>
+
+static inline uint64_t get_cycles() {
+  uint64_t a, d;
+  __asm volatile("rdtsc" : "=a" (a), "=d" (d));
+  return a | (d<<32);
+}
 
 // These is needed to ensure each grain size is divisible by the SIMD vector size. A value of 64
 // should be sufficiently high enough to protect against all the common vector lengths (4, 8,
@@ -74,6 +81,15 @@ pthread_key_t global_id;
 
 pthread_once_t runtime_is_initialized = PTHREAD_ONCE_INIT;
 
+typedef struct {
+  int32_t id;
+  void *result;
+  void (*cond_func)(bool*);
+  par_func_t build_func;
+  void *build_params;
+  void **depends_on;
+} defered_assign;
+
 struct run_data {
   pthread_mutex_t lock;
   int32_t n_workers;
@@ -88,6 +104,12 @@ struct run_data {
   map<intptr_t, int64_t> allocs;
   int64_t cur_mem;
   volatile int64_t err; // "errno" is a macro on some systems so we'll call this "err"
+  map<int32_t, defered_assign*> defer_assign_data;
+  void *module; // the Weld module
+  int32_t explore_period;
+  int32_t explore_length;
+  int32_t exploit_period;
+  vector<profile_stats_t*> profile_data;
 };
 
 map<int64_t, run_data*> *runs;
@@ -199,20 +221,171 @@ static inline bool try_steal(int32_t my_id, run_data *rd) {
   }
 }
 
-// Called once task function returns.
+static inline work_t *last_cont(work_t *task) {
+  work_t *last_cont = task;
+  while (last_cont->cont != NULL) {
+    last_cont = last_cont->cont;
+  }
+  return last_cont;
+}
+
+// set the continuation of w to cont and increment cont
+// dependency count
+static inline void set_cont(work_t *w, work_t *cont) {
+  w->cont = cont;
+  __sync_fetch_and_add(&cont->deps, 1);
+}
+
+static inline void insert_cont(work_t *w, work_t *cont) {
+  if (w->cont != NULL) {
+    last_cont(cont)->cont = w->cont;
+  }
+  w->cont = cont;
+  __sync_fetch_and_add(&cont->deps, 1);
+}
+
+static inline work_t *clone_task(work_t *task) {
+  work_t *clone = (work_t *)malloc(sizeof(work_t));
+  memcpy(clone, task, sizeof(work_t));
+  clone->full_task = false;
+  return clone;
+}
+
+static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors, int64_t lower, int64_t upper, int32_t grain_size) {
+  work_t *task = (work_t *)calloc(1, sizeof(work_t));
+  task->flavors = flavors;
+  task->flavor_count = n_flavors;
+  task->lower = lower;
+  task->upper = upper;
+  task->cur_idx = lower;
+  task->task_id = id,
+  task->grain_size = grain_size;
+  // TODO: only do this for n_flavors > 1
+  task->vw_greedy = (vw_greedy_stats_t *)calloc(1, sizeof(vw_greedy_stats_t));
+  if (n_flavors > 1) {
+    task->vw_greedy->explore_period = get_run_data()->explore_period;
+    task->vw_greedy->explore_length = get_run_data()->explore_length;
+    task->vw_greedy->exploit_period = get_run_data()->exploit_period;
+    task->vw_greedy->phase_end = task->vw_greedy->explore_length;
+    task->vw_greedy->explore_start = task->vw_greedy->explore_length;
+  }
+  task->profile = (profile_stats_t *)calloc(1, sizeof(profile_stats_t));
+  task->profile->task_id = id;
+  return task;
+}
+
+static inline work_t *new_task(int64_t id, par_func_t fp, void *data, int64_t lower, int64_t upper, int32_t grain_size) {
+  flavor_t *flavor = (flavor_t *)calloc(1, sizeof(flavor_t));
+  flavor->fp = fp;
+  flavor->data = data;
+  return new_task(id, flavor, 1, lower, upper, grain_size);
+}
+
+static inline work_t *new_task(int64_t id, par_func_t fp, void *data) {
+  return new_task(id, fp, data, 0, 0, 0);
+}
+
+static inline bool defered_is_initialized(run_data *rd, int32_t defered_id) {
+  return rd->defer_assign_data[defered_id]->result != NULL;
+}
+
+static inline bool defered_may_be_initialized(run_data *rd, int32_t defered_id) {
+  if (!defered_is_initialized(rd, defered_id)) {
+    bool result;
+    rd->defer_assign_data[defered_id]->cond_func(&result);
+    return result;
+  }
+  return true;
+}
+
+// Called after an instrumented task is finished. Checks if defered assignments are now
+// ready to be built, and if so, creates a task for each one that is, and sets it
+// as the continuation of the instrumented task. If necessary, a task is also created
+// to compile lazy flavors, which is returned by the function.
+static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data *rd) {
+  work_t *cont = task->cont;
+  // Check for each defered assign whether it is ready to be built
+  for (auto const& entry : rd->defer_assign_data) {
+    const defered_assign *da = entry.second;
+    if (da->result == NULL) {
+      bool should_build = false;
+      da->cond_func(&should_build);
+      if (should_build) {
+        work_t *build_task = new_task(-5, da->build_func, da->build_params);
+        insert_cont(task, build_task);
+        cont->deps = 1;
+        // build_task->cont = task->cont;
+        // build_task->deps++;
+        // task->cont = build_task;
+      }
+    }
+  }
+
+  // Check for each of the upcoming flavors whether we should compile them
+  vector<flavor_t*> *to_compile = new vector<flavor_t*>();
+  for (int32_t i = 0; i < cont->flavor_count; i++) {
+    flavor_t *flavor = &cont->flavors[i];
+    if (flavor->fp == NULL) {
+      bool compile = true;
+      for (int32_t i = 0; i < flavor->if_initialized_count; i++) {
+        compile = defered_may_be_initialized(rd, flavor->if_initialized[i]);
+        if (!compile) {
+          break;
+        }
+      }
+
+      if (compile) {
+        // fprintf(stderr, "PUSHED FLAVOR TO COMPILE\n");
+        to_compile->push_back(flavor);
+      }
+    }
+  }
+
+  if (!to_compile->empty()) {
+    // Create compilation task
+    work_t *compile_task = new_task(-10, [](work_t *t, int32_t f) { 
+      vector<flavor_t*> *to_compile = (vector<flavor_t*> *)t->flavors[0].data;
+      // TODO: change weld_rt_compile_func so it accepts a vector of functions to compile
+      void *module = get_run_data()->module;
+      for (auto const& flavor : *to_compile) {
+        // fprintf(stderr, "started compiling %d\n", flavor->func_id);
+        flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
+        // fprintf(stderr, "done compiling %d\n", flavor->func_id);
+      }
+      delete to_compile;
+    }, (void *)to_compile);
+
+    return compile_task;
+  }
+  return NULL;
+}
+
+// Called once task function returns
 // Decrease the dependency count of the continuation, run the continuation
-// if necessary, or signal the end of the computation if we are done.
+// if necessary, or signal the end of the computation if we are done
 static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   if (task->cont == NULL) {
+    task->profile->end_cycle = get_cycles();
+    // fprintf(stderr, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
     if (!task->continued) {
       // if this task has no continuation and there was no for loop to end it,
       // the computation is over
       rd->done = true;
     }
-    free(task->data);
+    for (int i = 0; i < task->flavor_count; i++) {
+      // free(task->flavors[i].data);
+    }
+    // free(task->flavors);
   } else {
     int32_t previous = __sync_fetch_and_sub(&task->cont->deps, 1);
     if (previous == 1) {
+      task->profile->end_cycle = get_cycles();
+      // If the task was instrumented, check if there are defered lets
+      // to execute and flavors to compile.
+      work_t *compile_task = NULL;
+      if (task->flavors[0].instrumented_globals_count > 0) {
+        compile_task = finish_instrumented(task, my_id, rd);
+      }
       // Enqueue the continuation since we are the last dependency.
       // If there are any tasks left on our queue we know it's safe
       // to not make this full, since we must have executed all of
@@ -225,9 +398,26 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
       }
       pthread_spin_lock(rd->all_work_queue_locks + my_id);
       (rd->all_work_queues + my_id)->push_front(task->cont);
+      if (compile_task != NULL) {
+        (rd->all_work_queues + my_id)->push_front(compile_task);
+      }
       pthread_spin_unlock(rd->all_work_queue_locks + my_id);
       // we are the last sibling with this data, so we can free it
-      free(task->data);
+      for (int i = 0; i < task->flavor_count; i++) {
+        // free(task->flavors[i].data);
+      }
+      // free(task->flavors);
+      // fprintf(stderr, "finished task, moving on\n");
+      // fprintf(stderr, "%lld, %lld, %lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+      if (task->flavor_count > 1) {
+        for (int i = 0; i < task->flavor_count; i++) {
+          break;
+          fprintf(stderr, "Task %lld var %d: last_avg_cost=%f calls=%d\n", 
+                          task->task_id, i, 
+                          task->flavors[i].avg_cost,
+                          task->flavors[i].calls);
+        }
+      }
     }
     if (task->full_task) {
       free(task->nest_idxs);
@@ -237,42 +427,51 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   free(task);
 }
 
-// set the continuation of w to cont and increment cont
-// dependency count
-static inline void set_cont(work_t *w, work_t *cont) {
-  w->cont = cont;
-  __sync_fetch_and_add(&cont->deps, 1);
-}
-
-static inline work_t *clone_task(work_t *task) {
-  work_t *clone = (work_t *)malloc(sizeof(work_t));
-  memcpy(clone, task, sizeof(work_t));
-  clone->full_task = false;
-  return clone;
-}
-
 // called from generated code to schedule a for loop with the given body and continuation
 // the data pointers store the closures for the body and continuation
 // lower and upper give the iteration range for the loop
 // w is the currently executing task
-extern "C" void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, void (*body)(work_t*),
-  void (*cont)(work_t*), int64_t lower, int64_t upper, int32_t grain_size) {
-  work_t *body_task = (work_t *)malloc(sizeof(work_t));
-  memset(body_task, 0, sizeof(work_t));
-  body_task->data = body_data;
-  body_task->fp = body;
-  body_task->lower = lower;
-  body_task->upper = upper;
-  body_task->cur_idx = lower;
-  body_task->task_id = w->task_id + 1;
-  body_task->grain_size = grain_size;
-  work_t *cont_task = (work_t *)malloc(sizeof(work_t));
-  memset(cont_task, 0, sizeof(work_t));
-  cont_task->data = cont_data;
-  cont_task->fp = cont;
+extern "C" void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, par_func_t body,
+    par_func_t cont, int64_t lower, int64_t upper, int32_t grain_size) {
+
+  flavor_t *flavors = (flavor_t *)malloc(sizeof(flavor_t));
+  flavors->fp = body;
+  flavors->data = body_data;
+
+  weld_rt_start_switch(w, flavors, cont_data, cont, lower, upper, grain_size, 1);
+}
+
+extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *cont_data, 
+    par_func_t cont, int64_t lower, int64_t upper, int32_t grain_size, int32_t flavor_count) {
+
+  // fprintf(stderr, "weld_rt_start_switch\n");
+  int64_t next_task_id = w->task_id + 1;
+
+  // If the body has an instrumented flavor, we'll make a separate task for it that 
+  // must be run first. The instrumented flavor is always the first flavor.
+  work_t *instrumented_task = NULL;
+  if (flavor_count > 1 && body_flavors[0].instrumented_globals_count > 0 && upper - lower > grain_size) {
+    // fprintf(stderr, "creating instrumented task\n");
+    instrumented_task = new_task(next_task_id++, body_flavors, 1, lower, lower + grain_size, grain_size);
+    // The body task will skip the instrumented flavor.
+    flavor_count--;
+    flavor_t *tmp = (flavor_t *)malloc(sizeof(flavor_t) * flavor_count);
+    memcpy(tmp, body_flavors + 1, sizeof(flavor_t) * flavor_count);
+    body_flavors = tmp;
+    lower += grain_size;
+  }
+
+  // Create task for the body, and set it as continuation for the instrumented version
+  // if it exists.
+  work_t *body_task = new_task(next_task_id++, body_flavors, flavor_count, lower, upper, grain_size);
+  if (instrumented_task != NULL) {
+    set_cont(instrumented_task, body_task);
+  }
+
+  // Create task for final continuation of body, which inherits the current
+  // task continuation.
+  work_t *cont_task = new_task(next_task_id++, cont, cont_data);
   cont_task->cur_idx = w->cur_idx;
-  // ensures continuation and all descendants have greater task ID than body
-  cont_task->task_id = w->task_id + 2;
   set_cont(body_task, cont_task);
   if (w != NULL) {
     if (w->cont != NULL) {
@@ -296,7 +495,7 @@ extern "C" void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, 
     new_outer_task1 = clone_task(w);
     new_outer_task1->lower = w->cur_idx + 1;
     new_outer_task1->cur_idx = w->cur_idx + 1;
-    set_cont(new_outer_task1, w->cont);
+    set_cont(new_outer_task1, w->cont) ;
     // always split into two tasks if possible
     if (new_outer_task1->upper - new_outer_task1->lower > 1) {
       new_outer_task2 = clone_task(new_outer_task1);
@@ -314,12 +513,21 @@ extern "C" void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, 
   run_data *rd = get_run_data();
   pthread_spin_lock(rd->all_work_queue_locks + my_id);
   if (new_outer_task2 != NULL) {
+    // fprintf(stderr, "push new_outer_task2\n");
     (rd->all_work_queues + my_id)->push_front(new_outer_task2);
   }
   if (new_outer_task1 != NULL) {
+    // fprintf(stderr, "push new_outer_task1\n");
     (rd->all_work_queues + my_id)->push_front(new_outer_task1);
   }
-  (rd->all_work_queues + my_id)->push_front(body_task);
+  if (instrumented_task != NULL) {
+    // fprintf(stderr, "push instrumented_task %lld\n", instrumented_task->task_id);
+    (rd->all_work_queues + my_id)->push_front(instrumented_task);
+  } 
+  else {
+    // fprintf(stderr, "push body_task %lld\n", body_task->task_id);
+    (rd->all_work_queues + my_id)->push_front(body_task);
+  }
   pthread_spin_unlock(rd->all_work_queue_locks + my_id);
 }
 
@@ -365,6 +573,94 @@ static inline void cleanup_tasks_on_thread(work_t *cur_task, int32_t my_id, run_
   }
 }
 
+static inline bool may_run(run_data *rd, flavor_t *flavor) {
+  if (flavor->fp == NULL) {
+    return false;
+  }
+  if (flavor->instrumented_globals_count > 0 && flavor->calls > 0) {
+    return false;
+  }
+  if (flavor->if_initialized_count > 0) {
+    for (size_t i = 0; i < flavor->if_initialized_count; i++) {
+      if (!defered_is_initialized(rd, flavor->if_initialized[i])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static inline bool is_init_phase(run_data *rd, work_t *task) {
+  for (size_t i = 0; i < task->flavor_count; i++) {
+    if (may_run(rd, &task->flavors[i]) && task->flavors[i].calls == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static inline int32_t get_lru_flavor(run_data *rd, work_t *task) {
+  int32_t min_last_called = std::numeric_limits<int32_t>::max();
+  int32_t flavor = -1;
+  for (int32_t i = 0; i < task->flavor_count; i++) {
+    if (may_run(rd, &task->flavors[i]) && task->flavors[i].last_called < min_last_called) {
+      min_last_called = task->flavors[i].last_called;
+      flavor = i;
+    }
+  }
+  return flavor;
+}
+
+static inline int32_t get_best_flavor(run_data *rd, work_t *task) {
+  double min_avg_cost = std::numeric_limits<double>::max();
+  int32_t flavor = -1;
+  for (int32_t i = 0; i < task->flavor_count; i++) {
+    if (may_run(rd, &task->flavors[i]) && task->flavors[i].calls > 0 && task->flavors[i].avg_cost < min_avg_cost) {
+      min_avg_cost = task->flavors[i].avg_cost;
+      flavor = i;
+    }
+  }
+  return flavor;
+}
+
+pthread_mutex_t vw_greedy_lock;
+static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
+  pthread_mutex_lock(&vw_greedy_lock);
+  task->profile->tot_cycles += cycles;
+  task->profile->tot_tuples += task->upper - task->lower;
+  task->profile->calls++;
+  task->flavors[task->vw_greedy->flavor].calls++;
+  task->flavors[task->vw_greedy->flavor].last_called = task->profile->calls;
+
+  if (task->flavor_count > 1 && task->profile->calls == task->vw_greedy->phase_end) {
+    // TODO: there will be tasks that started before this happens,
+    // but call update_flavor after this has happened. They should NOT contribute to
+    // the average cost of this flavor. Perhaps work_t should get an additional field local_flavor
+    // which indicates with which flavor it actually ran.
+    profile_stats_t profile = *task->profile;
+    vw_greedy_stats_t vw_greedy = *task->vw_greedy;
+    task->flavors[task->vw_greedy->flavor].avg_cost = (double) (task->profile->tot_cycles - task->profile->prev_cycles) /
+                                            (task->profile->tot_tuples - task->profile->prev_tuples);
+
+    if (task->profile->calls > task->vw_greedy->explore_start) {
+      // fprintf(stderr, "EXPLORE\n");
+      task->vw_greedy->explore_start += task->vw_greedy->explore_period;
+      task->vw_greedy->flavor = get_lru_flavor(rd, task);
+      task->vw_greedy->phase_end += task->vw_greedy->exploit_period;
+    } else {
+      // fprintf(stderr, "EXPLOIT\n");
+      task->vw_greedy->flavor = get_best_flavor(rd, task);
+      task->vw_greedy->phase_end += task->vw_greedy->exploit_period;
+    }
+
+    task->profile->prev_tuples = task->profile->tot_tuples;
+    task->profile->prev_cycles = task->profile->tot_cycles;
+
+    // fprintf(stderr, "task %llu: chose flavor %d\n", task->task_id, task->vw_greedy->flavor);
+  }
+  pthread_mutex_unlock(&vw_greedy_lock);
+}
+
 // keeps executing items from the work queue until it is empty
 static inline void work_loop(int32_t my_id, run_data *rd) {
   while (true) {
@@ -386,7 +682,23 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
         return;
       }
       if (!setjmp(rd->work_loop_roots[my_id])) {
-        popped->fp(popped);
+        // Get variation to run
+        // int32_t choice = get_function_variation(rd, popped);
+        int32_t choice = popped->vw_greedy->flavor;
+
+        // Run variation
+        uint64_t start = get_cycles();
+        __sync_bool_compare_and_swap(&popped->profile->start_cycle, 0, start);
+        // fprintf(stderr, "thread %d: task %lld var %d\n", my_id, popped->task_id, choice);
+        flavor_t flavor = popped->flavors[choice];
+        flavor.fp(popped, choice);
+        // popped->flavors[choice].fp(popped, choice);
+        uint64_t end = get_cycles();
+        
+        // Update stats
+        update_flavor(rd, popped, end - start);
+        // update_function_variation_stats(rd, popped, choice, (end - start)*10);
+
         finish_task(popped, my_id, rd);
       } else {
         // error-case exit from task
@@ -426,12 +738,35 @@ static void *thread_func(void *data) {
   return NULL;
 }
 
+extern "C" void weld_rt_defer_build(int32_t id, void (*condition)(bool*), 
+  par_func_t build, void* build_params, void** depends_on) {
+
+  defered_assign *da = (defered_assign *)malloc(sizeof(defered_assign));
+  da->id = id;
+  da->result = NULL;
+  da->cond_func = condition;
+  da->build_func = build;
+  da->build_params = build_params;
+  da->depends_on = depends_on;
+
+  get_run_data()->defer_assign_data[id] = da;
+}
+
+extern "C" void *weld_rt_get_defered_result(int32_t id) {
+  return get_run_data()->defer_assign_data[id]->result;
+}
+
+extern "C" void weld_rt_set_defered_result(int32_t id, void* result) {
+  get_run_data()->defer_assign_data[id]->result = result;
+}
 
 // *** weld_run functions and helpers ***
 
 // kick off threads running thread_func
 // block until the computation is complete
-extern "C" int64_t weld_run_begin(void (*run)(work_t*), void *data, int64_t mem_limit, int32_t n_workers) {
+extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit, int32_t n_workers, void *module,
+    int32_t explore_period, int32_t explore_length, int32_t exploit_period) {
+
   run_data *rd = new run_data;
   pthread_mutex_init(&rd->lock, NULL);
   rd->n_workers = n_workers;
@@ -444,11 +779,12 @@ extern "C" int64_t weld_run_begin(void (*run)(work_t*), void *data, int64_t mem_
   rd->mem_limit = mem_limit;
   rd->cur_mem = 0;
   rd->err = 0;
+  rd->module = module;
+  rd->explore_period = explore_period;
+  rd->explore_length = explore_length;
+  rd->exploit_period = exploit_period;
 
-  work_t *run_task = (work_t *)malloc(sizeof(work_t));
-  memset(run_task, 0, sizeof(work_t));
-  run_task->data = data;
-  run_task->fp = run;
+  work_t *run_task = new_task(0, run, data);
   // this initial task can be thought of as a continuation
   set_full_task(run_task);
   rd->all_work_queues[0].push_front(run_task);

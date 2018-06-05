@@ -383,6 +383,23 @@ extern "C" void *weld_rt_dict_to_array(void *d, int32_t value_offset_in_struct, 
   return array;
 }
 
+extern "C" void *weld_rt_dict_keys_to_array(void *d) {
+  weld_dict *wd = (weld_dict *)d;
+  assert(wd->finalized);
+  simple_dict *global = get_global_dict(wd);
+  void *array = weld_run_malloc(weld_rt_get_run_id(), global->size * wd->key_size);
+  int64_t next_arr_slot = 0;
+  for (int64_t i = 0; i < global->capacity; i++) {
+    void *cur_slot = slot_at(i, wd, global);
+    if (*filled_at(cur_slot)) {
+      memcpy((uint8_t *)array + next_arr_slot * wd->key_size, key_at(cur_slot), wd->key_size);
+      next_arr_slot++;
+    }
+  }
+  assert(next_arr_slot == global->size);
+  return array;
+}
+
 extern "C" int64_t weld_rt_dict_get_size(void *d) {
   weld_dict *wd = (weld_dict *)d;
   assert(wd->finalized);

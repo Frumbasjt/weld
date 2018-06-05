@@ -1,3 +1,6 @@
+extern crate failure;
+
+use std::convert::From;
 use std::error;
 use std::fmt;
 

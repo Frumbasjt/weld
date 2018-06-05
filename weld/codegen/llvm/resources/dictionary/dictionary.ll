@@ -8,6 +8,7 @@
 ; - KV_STRUCT: name of struct holding {{KEY, VALUE}} (should be generated outside)
 ; - KV_VEC: name of vector of KV_STRUCTs (should be generated outside)
 ; - KV_VEC_PREFIX: prefix for helper functions of KV_VEC
+; - K_VEC: name of vector of Ks (should be generated outside)
 
 ; hash, isFilled, lockVar, padding, key, value 
 ; (packed so that C code can easily store it in a byte array without considering padding)
@@ -126,4 +127,14 @@ define {KV_VEC} @{NAME}.tovec(%{NAME} %dict) {{
   %1 = insertvalue {KV_VEC} undef, {KV_STRUCT}* %arr, 0
   %2 = insertvalue {KV_VEC} %1, i64 %size, 1
   ret {KV_VEC} %2
+}}
+
+; Get the keys of a dictionary as a vector.
+define {K_VEC} @{NAME}.keys(%{NAME} %dict) {{
+  %arrRaw = call i8* @weld_rt_dict_keys_to_array(i8* %dict)
+  %arr = bitcast i8* %arrRaw to {KEY}*
+  %size = call i64 @weld_rt_dict_size(i8* %dict)
+  %1 = insertvalue {K_VEC} undef, {KEY}* %arr, 0
+  %2 = insertvalue {K_VEC} %1, i64 %size, 1
+  ret {K_VEC} %2
 }}

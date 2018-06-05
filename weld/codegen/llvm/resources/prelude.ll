@@ -57,6 +57,7 @@ declare <4 x double> @llvm.maxnum.v4f64(<4 x double>, <4 x double>)
 
 ; std library functions
 declare i8* @malloc(i64)
+declare i8* @calloc(i64, i64)
 declare void @qsort(i8*, i64, i64, i32 (i8*, i8*)*)
 declare i32 @memcmp(i8*, i8*, i64)
 declare float @erff(float)
@@ -88,7 +89,7 @@ declare i32 @puts(i8* nocapture) nounwind
 
 ; Weld runtime functions
 
-declare i64     @weld_run_begin(void (%work_t*)*, i8*, i64, i32)
+declare i64     @weld_run_begin(void (%work_t*, i32)*, i8*, i64, i32, i8*, i32, i32, i32)
 declare i8*     @weld_run_get_result(i64)
 
 declare i8*     @weld_run_malloc(i64, i64)
@@ -103,7 +104,8 @@ declare void    @weld_rt_abort_thread()
 declare i32     @weld_rt_get_nworkers()
 declare i64     @weld_rt_get_run_id()
 
-declare void    @weld_rt_start_loop(%work_t*, i8*, i8*, void (%work_t*)*, void (%work_t*)*, i64, i64, i32)
+declare void    @weld_rt_start_loop(%work_t*, i8*, i8*, void (%work_t*, i32)*, void (%work_t*, i32)*, i64, i64, i32)
+declare void    @weld_rt_start_switch(%work_t*, %flavor_t*, i8*, void (%work_t*, i32)*, i64, i64, i32, i32)
 declare void    @weld_rt_set_result(i8*)
 
 declare i8*     @weld_rt_new_vb(i64, i64, i32)
@@ -127,22 +129,38 @@ declare i8*     @weld_rt_dict_to_array(i8*, i32, i32)
 declare i64     @weld_rt_dict_size(i8*)
 declare void    @weld_rt_dict_serialize(i8*, i8*, i32, void (i8*, i8*)*, void (i8*, i8*)*) 
 declare void    @weld_rt_dict_free(i8*)
+declare i8*     @weld_rt_dict_keys_to_array(i8*)
 
 declare i8*     @weld_rt_gb_new(i32, i32 (i8*, i8*)*, i32, i64, i64)
 declare void    @weld_rt_gb_merge(i8*, i8*, i32, i8*)
 declare i8*     @weld_rt_gb_result(i8*)
 declare void    @weld_rt_gb_free(i8*)
 
+declare i8*     @weld_rt_bf_new(i64)
+declare void    @weld_rt_bf_add(i8*, i32)
+declare i1      @weld_rt_bf_contains(i8*, i32)
+declare void    @weld_rt_bf_free(i8*)
+
+declare void    @weld_rt_defer_build(i32, void (i1*)*, void (%work_t*, i32)*, i8*, i8**)
+declare i8*     @weld_rt_get_defered_result(i32)
+declare void    @weld_rt_set_defered_result(i32, i8*)
+
 ; Parallel runtime structures
+; flavor_t struct in runtime.h
+%flavor_t = type { i8*, void (%work_t*, i32)*, i32, i8**, i32, i32*, i32, i1, i32, i32, double }
+; profile_stats_t struct in runtime.h
+%profile_stats_t = type { i64, i32, i64, i64, i64, i64, i64, i64 }
+; vw_greedy_stats_t struct in runtime.h
+%vw_greedy_stats_t = type { i32, i32, i32, i32, i32, i32 }
 ; work_t struct in runtime.h
-%work_t = type { i8*, i64, i64, i64, i32, i64*, i64*, i32, i64, void (%work_t*)*, %work_t*, i32, i32, i32 }
+%work_t = type { %flavor_t*, i64, i64, i64, i32, i64*, i64*, i32, i64, %work_t*, i32, i32, i32, i32, %flavor_t**, %profile_stats_t*, %vw_greedy_stats_t* }
 ; vec_piece struct in runtime.h
 %vb.vp = type { i8*, i64, i64, i64*, i64*, i32 }
 ; vec_output struct in runtime.h
 %vb.out = type { i8*, i64 }
 
-; Input argument (input data pointer, nworkers, mem_limit)
-%input_arg_t = type { i64, i32, i64 }
+; Input argument (input data pointer, nworkers, mem_limit, module pointer, explore period, explore length, explore period)
+%input_arg_t = type { i64, i32, i64, i64, i32, i32, i32 }
 ; Return type (output data pointer, run ID, errno)
 %output_arg_t = type { i64, i64, i64 }
 

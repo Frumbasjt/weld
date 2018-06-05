@@ -22,7 +22,7 @@ fn main() {
     // Link C++ standard library and some Mac-specific libraries
     let target = env::var("TARGET").unwrap();
     if target == "x86_64-apple-darwin" {
-        let libs = vec!["z", "c++"];
+        let libs = vec!["z", "c++", "ffi"];
         for lib in libs {
             println!("cargo:rustc-link-lib={}", lib);
         }

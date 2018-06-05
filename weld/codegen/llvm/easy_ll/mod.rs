@@ -1,3 +1,4 @@
+
 //! A very simple wrapper for LLVM that can JIT functions written as IR strings.
 
 extern crate llvm_sys as llvm;
@@ -17,7 +18,7 @@ use std::ptr;
 
 use self::llvm::support::LLVMLoadLibraryPermanently;
 use self::llvm::prelude::{LLVMContextRef, LLVMModuleRef, LLVMMemoryBufferRef};
-use self::llvm::execution_engine::{LLVMExecutionEngineRef, LLVMMCJITCompilerOptions, LLVMGetExecutionEngineTargetMachine};
+use self::llvm::execution_engine::{LLVMExecutionEngineRef, LLVMMCJITCompilerOptions, LLVMGetExecutionEngineTargetMachine, LLVMAddModule};
 
 use self::llvm::target_machine::{LLVMCodeGenFileType, LLVMTargetMachineEmitToMemoryBuffer};
 use self::llvm::core::{LLVMGetBufferStart, LLVMPrintModuleToString};
@@ -143,13 +144,13 @@ pub fn load_library(libname: &str) -> Result<(), LlvmError> {
 /// Compile a string of LLVM IR (in human readable format) into a `CompiledModule` that can then
 /// be executed. The LLVM IR should contain an entry point function called `run` that takes `i64`
 /// and returns `i64`, which will be called by `CompiledModule::run`.
-pub fn compile_module(
+pub fn compile_init_module(
         code: &str,
         optimization_level: u32,
         dump_code: bool,
         bc_file: Option<&[u8]>)
         -> Result<Compiled, LlvmError> {
-
+    
     let mut timing = LlvmTimingInfo::new();
 
     unsafe {
@@ -216,7 +217,7 @@ pub fn compile_module(
         // Find the run function
         let start = PreciseTime::now();
         result.engine = Some(engine);
-        result.run_function = Some(find_function(engine, "run")?);
+        result.run_function = Some(find_function::<i64, i64>(engine, "run")?);
         let end = PreciseTime::now();
         timing.times.push(("Find Run Func Address".to_string(), start.to(end)));
         debug!("Done generating/finding run function");
@@ -235,6 +236,62 @@ pub fn compile_module(
             timing: timing
         };
         Ok(result)
+    }
+}
+
+pub fn compile_and_add_to_module<I, O>(compiled: &CompiledModule,
+                                       code: &str, 
+                                       func_name: &str,
+                                       optimization_level: u32,
+                                       dump_code: bool, 
+                                       bc_file: Option<&[u8]>) -> Result<(extern "C" fn(I) -> O, Option<CodeDump>), LlvmError> {
+
+    let start = PreciseTime::now();
+
+    unsafe {
+        let context = compiled.context;
+        let engine = compiled.engine.unwrap();
+
+        // Parse the IR to get an LLVMModuleRef
+        let module = parse_module_str(context, code)?;
+        debug!("Done parsing module");
+
+        // Parse the bytecode file and link it.
+        if let Some(s) = bc_file {
+            let bc_module = parse_module_bytes(context, s)?;
+            debug!("Done parsing bytecode file");
+            llvm::linker::LLVMLinkModules2(module, bc_module);
+            debug!("Done linking bytecode file");
+        }
+
+        // Validate the module
+        verify_module(module)?;
+        debug!("Done validating module");
+
+        // Optimize the module.
+        optimize_module(module, optimization_level)?;
+        debug!("Done optimizing module");
+
+        // Add module to engine
+        LLVMAddModule(engine, module);
+        debug!("Done adding module to engine");
+
+        // Find the run function
+        let run_function = find_function::<I, O>(engine, func_name)?;
+        debug!("Done generating/finding function");
+
+        let code = if dump_code {
+            let ir = output_llvm_ir(module)?;
+            let assembly = output_target_machine_assembly(engine, module)?;
+            Some(CodeDump { optimized_llvm: ir, assembly: assembly })
+        } else {
+            None
+        };
+
+        let end = PreciseTime::now();
+        debug!("Compiling function took {}", start.to(end).num_milliseconds());
+
+        Ok((run_function, code))
     }
 }
 
@@ -407,13 +464,13 @@ unsafe fn create_exec_engine(module: LLVMModuleRef, optimization_level: u32)
 }
 
 /// Get a pointer to a named function in an execution engine.
-unsafe fn find_function(engine: LLVMExecutionEngineRef, name: &str) -> Result<I64Func, LlvmError> {
+unsafe fn find_function<I, O>(engine: LLVMExecutionEngineRef, name: &str) -> Result<extern "C" fn(I) -> O, LlvmError> {
     let c_name = CString::new(name).unwrap();
     let func_addr = llvm::execution_engine::LLVMGetFunctionAddress(engine, c_name.as_ptr());
     if func_addr == 0 {
         return Err(LlvmError(format!("No function named {} in module", name)));
     }
-    let function: I64Func = mem::transmute(func_addr);
+    let function: extern "C" fn(I) -> O = mem::transmute(func_addr);
     Ok(function)
 }
 
@@ -423,10 +480,10 @@ unsafe fn output_target_machine_assembly(engine: LLVMExecutionEngineRef, module:
     -> Result<String, LlvmError> {
     // We create a pointer to a MemoryBuffer, and pass its address to be modified by
     // EmitToMemoryBuffer.
-    let mut output_buf : self::llvm::prelude::LLVMMemoryBufferRef = ptr::null_mut();
+    let mut output_buf: self::llvm::prelude::LLVMMemoryBufferRef = ptr::null_mut();
     let mut err = ptr::null_mut();
     let cur_target = LLVMGetExecutionEngineTargetMachine(engine);
-    let file_type :LLVMCodeGenFileType = LLVMCodeGenFileType::LLVMAssemblyFile;
+    let file_type: LLVMCodeGenFileType = LLVMCodeGenFileType::LLVMAssemblyFile;
     let res = LLVMTargetMachineEmitToMemoryBuffer(cur_target, module, file_type, &mut err, &mut output_buf);
     if res == 1 {
         let x = CStr::from_ptr(err as *mut c_char).to_string_lossy().into_owned();

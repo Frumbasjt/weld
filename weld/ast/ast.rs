@@ -25,9 +25,8 @@ pub enum Type {
     Vector(Box<Type>),
     /// A dictionary mapping keys to values.
     Dict(Box<Type>, Box<Type>),
-    /// A mutable builder to construct results.
     Builder(BuilderKind, Annotations),
-    /// An ordered struct or tuple.
+    BloomFilter(Box<Type>),
     Struct(Vec<Type>),
     /// A function with a list of arguments and return type.
     Function(Vec<Type>, Box<Type>),
@@ -48,6 +47,9 @@ impl Type {
             Dict(ref key, ref value) => {
                 vec![key.as_ref(), value.as_ref()]
             }
+            BloomFilter(ref elem) => {
+                vec![elem.as_ref()]
+            }
             Builder(ref kind, _) => match kind {
                 Appender(ref elem) => {
                     vec![elem.as_ref()]
@@ -62,6 +64,9 @@ impl Type {
                     vec![key.as_ref(), value.as_ref()]
                 }
                 VecMerger(ref elem, _) => {
+                    vec![elem.as_ref()]
+                }
+                BloomBuilder(ref elem) => {
                     vec![elem.as_ref()]
                 }
             },
@@ -171,6 +176,9 @@ impl fmt::Display for Type {
             }
             Dict(ref key, ref value) => {
                 format!("dict[{},{}]", key, value)
+            }
+            BloomFilter(ref elem) => {
+                format!("bloomfilter[{}]", elem)
             }
             Struct(ref elems) => {
                 util::join("{", ",", "}", elems.iter().map(|e| e.to_string()))
@@ -304,6 +312,8 @@ pub enum BuilderKind {
     ///
     /// Elements are updated by index using an associative binary operator.
     VecMerger(Box<Type>, BinOpKind),
+    // elem_type
+    BloomBuilder(Box<Type>)
 }
 
 impl BuilderKind {
@@ -317,6 +327,7 @@ impl BuilderKind {
             DictMerger(ref key, ref value, _) => Struct(vec![*key.clone(), *value.clone()]),
             GroupMerger(ref key, ref value) => Struct(vec![*key.clone(), *value.clone()]),
             VecMerger(ref elem, _) => Struct(vec![Scalar(I64), *elem.clone()]),
+            BloomBuilder(ref elem) => *elem.clone(),
         }
     }
 
@@ -330,6 +341,7 @@ impl BuilderKind {
             DictMerger(ref key, ref value, _) => Dict(key.clone(), value.clone()),
             GroupMerger(ref key, ref value) => Dict(key.clone(), Box::new(Vector(value.clone()))),
             VecMerger(ref elem, _) => Vector(elem.clone()),
+            BloomBuilder(ref elem) => BloomFilter(elem.clone())
         }
     }
 }
@@ -353,6 +365,9 @@ impl fmt::Display for BuilderKind {
             Merger(ref elem, op) => {
                 format!("merger[{},{}]", elem, op)
             }
+            BloomBuilder(ref t) => {
+                format!("bloombuilder[{}]", t)
+            }
         };
         f.write_str(text)
     }
@@ -365,36 +380,40 @@ impl fmt::Display for BuilderKind {
 pub struct Symbol {
     pub name: String,
     pub id: i32,
+    pub global: bool,
 }
 
 impl Symbol {
-    pub fn new(name: &str, id: i32) -> Symbol {
+    pub fn new(name: &str, id: i32, global: bool) -> Symbol {
         Symbol {
             name: name.into(),
             id: id,
+            global: global
         }
     }
 
-    pub fn name(name: &str) -> Symbol {
+    pub fn name(name: &str, global: bool) -> Symbol {
         Symbol {
             name: name.into(),
             id: 0,
+            global: global
         }
     }
 }
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.id == 0 {
-            write!(f, "{}", self.name)
-        } else {
-            write!(f, "{}__{}", self.name, self.id)
+        match (self.global, self.id) {
+            (true, 0)   => write!(f, "@{}", self.name),
+            (true, _)  => write!(f, "@{}__{}", self.name, self.id),
+            (false, 0)  => write!(f, "{}", self.name),
+            (false, _) => write!(f, "{}__{}", self.name, self.id)
         }
     }
 }
 
 /// A typed Weld expression tree.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Expr {
     pub ty: Type,
     pub kind: ExprKind,
@@ -441,7 +460,7 @@ impl fmt::Display for IterKind {
 
 /// An iterator, which specifies a vector to iterate over and optionally a start index,
 /// end index, and stride.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Iter {
     pub data: Box<Expr>,
     pub start: Option<Box<Expr>>,
@@ -453,6 +472,19 @@ pub struct Iter {
 }
 
 impl Iter {
+    // Returns a new simple iterator with no start/stride/end specified.
+    pub fn new_simple(data: Expr ) -> Iter {
+        Iter {
+            data: Box::new(data),
+            start: None,
+            end: None,
+            stride: None,
+            kind: IterKind::ScalarIter,
+            strides: None,
+            shape: None
+        }
+    }
+
     /// Returns true if this is a simple iterator.
     ///
     /// An iterator is simple if it has no start/stride/end specified (i.e., it iterates over all
@@ -468,7 +500,7 @@ impl Iter {
 /// This enumeration defines the operators in the Weld IR. Each operator relies on zero or more
 /// sub-expressions, forming an expression tree. We use the term "expression" to refer to a
 /// particular `ExprKind`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum ExprKind {
     Literal(LiteralKind),
     Ident(Symbol),
@@ -489,6 +521,7 @@ pub enum ExprKind {
         child_expr: Box<Expr>,
     },
     ToVec { child_expr: Box<Expr> },
+    Keys { child_expr: Box<Expr> },
     MakeStruct { elems: Vec<Expr> },
     MakeVector { elems: Vec<Expr> },
     Zip { vectors: Vec<Expr> },
@@ -506,6 +539,10 @@ pub enum ExprKind {
         data: Box<Expr>,
         index: Box<Expr>,
         size: Box<Expr>,
+    },
+    StrSlice {
+        data: Box<Expr>,
+        offset: Box<Expr>,
     },
     Sort {
         data: Box<Expr>,
@@ -548,7 +585,7 @@ pub enum ExprKind {
         value: Box<Expr>,
         value_ty: Box<Type>,
     },
-    NewBuilder(Option<Box<Expr>>),
+    NewBuilder(Vec<Expr>),
     For {
         iters: Vec<Iter>,
         builder: Box<Expr>,
@@ -559,6 +596,14 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
     Res { builder: Box<Expr> },
+    SwitchFor {
+        fors: Vec<Expr>
+    },
+    SimdWidth(ScalarKind),
+    BloomFilterContains {
+        bf: Box<Expr>,
+        item: Box<Expr>
+    }
 }
 
 impl ExprKind {
@@ -575,6 +620,7 @@ impl ExprKind {
             UnaryOp { .. } => "UnaryOp",
             Cast { .. } => "Cast",
             ToVec { .. } => "ToVec",
+            Keys { .. } => "Keys",
             MakeStruct { .. } => "MakeStruct",
             MakeVector { .. } => "MakeVector",
             Zip { .. } => "Zip",
@@ -583,6 +629,7 @@ impl ExprKind {
             Lookup { .. } => "Lookup",
             KeyExists { .. } => "KeyExists",
             Slice { .. } => "Slice",
+            StrSlice { .. } => "StrSlice",
             Sort { .. } => "Sort",
             Let { .. } => "Let",
             If { .. } => "If",
@@ -597,6 +644,9 @@ impl ExprKind {
             For { .. } => "For",
             Merge { .. } => "Merge",
             Res { .. } => "Res",
+            SwitchFor { .. } => "SwitchFor",
+            SimdWidth { .. } => "SimdWidth",
+            BloomFilterContains { .. } => "BloomFilterContains"
         }
     }
 
@@ -758,6 +808,15 @@ pub struct Parameter {
     pub ty: Type,
 }
 
+impl Parameter {
+    pub fn new(name: Symbol, ty: Type) -> Parameter {
+        Parameter {
+            name: name,
+            ty: ty
+        }
+    }
+}
+
 impl fmt::Display for Parameter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.name, self.ty)
@@ -777,6 +836,7 @@ impl Expr {
             UnaryOp {ref value, ..} => vec![value.as_ref()],
             Cast { ref child_expr, .. } => vec![child_expr.as_ref()],
             ToVec { ref child_expr } => vec![child_expr.as_ref()],
+            Keys { ref child_expr } => vec![child_expr.as_ref()],
             Let {
                 ref value,
                 ref body,
@@ -798,6 +858,10 @@ impl Expr {
                 ref index,
                 ref size,
             } => vec![data.as_ref(), index.as_ref(), size.as_ref()],
+            StrSlice {
+                ref data,
+                ref offset,
+            } => vec![data.as_ref(), offset.as_ref()],
             Sort {
                 ref data,
                 ref keyfunc,
@@ -829,6 +893,9 @@ impl Expr {
                 res.push(func.as_ref());
                 res
             }
+
+            SwitchFor { ref fors } => fors.iter().collect(),
+
             If {
                 ref cond,
                 ref on_true,
@@ -851,20 +918,17 @@ impl Expr {
                 res.extend(params.iter());
                 res
             }
-            NewBuilder(ref opt) => {
-                if let Some(ref e) = *opt {
-                    vec![e.as_ref()]
-                } else {
-                    vec![]
-                }
+            NewBuilder(ref args) => {
+                args.iter().collect()
             }
             Serialize(ref e) => vec![e.as_ref()],
             Deserialize { ref value, .. } => vec![value.as_ref()],
             CUDF { ref args, .. } => args.iter().collect(),
             Negate(ref t) => vec![t.as_ref()],
             Broadcast(ref t) => vec![t.as_ref()],
+            BloomFilterContains { ref bf, ref item } => vec![bf.as_ref(), item.as_ref()],
             // Explicitly list types instead of doing _ => ... to remember to add new types.
-            Literal(_) | Ident(_) => vec![],
+            Literal(_) | Ident(_) | SimdWidth(_) => vec![],
         }.into_iter()
     }
 
@@ -880,6 +944,7 @@ impl Expr {
             UnaryOp { ref mut value, .. } => vec![value.as_mut()],
             Cast { ref mut child_expr, .. } => vec![child_expr.as_mut()],
             ToVec { ref mut child_expr } => vec![child_expr.as_mut()],
+            Keys { ref mut child_expr } => vec![child_expr.as_mut()],
             Let {
                 ref mut value,
                 ref mut body,
@@ -904,6 +969,10 @@ impl Expr {
                 ref mut index,
                 ref mut size,
             } => vec![data.as_mut(), index.as_mut(), size.as_mut()],
+            StrSlice {
+                ref mut data,
+                ref mut offset,
+            } => vec![data.as_mut(), offset.as_mut()],
             Sort {
                 ref mut data,
                 ref mut keyfunc,
@@ -935,6 +1004,7 @@ impl Expr {
                 res.push(func.as_mut());
                 res
             }
+            SwitchFor { ref mut fors } => fors.iter_mut().collect(),
             If {
                 ref mut cond,
                 ref mut on_true,
@@ -958,20 +1028,17 @@ impl Expr {
                 res.extend(params.iter_mut());
                 res
             }
-            NewBuilder(ref mut opt) => {
-                if let Some(ref mut e) = *opt {
-                    vec![e.as_mut()]
-                } else {
-                    vec![]
-                }
+            NewBuilder(ref mut args) => {
+                args.iter_mut().collect()
             }
             Serialize(ref mut e) => vec![e.as_mut()],
             Deserialize { ref mut value, .. } => vec![value.as_mut()],
             CUDF { ref mut args, .. } => args.iter_mut().collect(),
             Negate(ref mut t) => vec![t.as_mut()],
             Broadcast(ref mut t) => vec![t.as_mut()],
+            BloomFilterContains { ref mut bf, ref mut item } => vec![bf.as_mut(), item.as_mut()],
             // Explicitly list types instead of doing _ => ... to remember to add new types.
-            Literal(_) | Ident(_) => vec![],
+            Literal(_) | Ident(_) | SimdWidth(_) => vec![],
         }.into_iter()
     }
 
@@ -983,7 +1050,7 @@ impl Expr {
         use self::Type::Unknown;
         match self.ty {
             Unknown => true,
-            _ => self.children().any(|e| e.ty.partial_type()),
+            _ => self.children().any(|e| e.ty.partial_type()) || self.annotations.exprs().any(|e| e.ty.partial_type()),
         }
     }
 

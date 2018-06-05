@@ -21,7 +21,7 @@ pub mod colors;
 /// Each SymbolGenerator tracks the maximum ID used for every symbol name, and can be used to
 /// create new symbols with the same name but a unique ID.
 pub struct SymbolGenerator {
-    id_map: fnv::FnvHashMap<String, i32>,
+    id_map: fnv::FnvHashMap<(String, bool), i32>,
 }
 
 impl SymbolGenerator {
@@ -32,39 +32,61 @@ impl SymbolGenerator {
 
     /// Initialize a SymbolGenerator from all the symbols defined in an expression.
     pub fn from_expression(expr: &Expr) -> SymbolGenerator {
-        let mut id_map: fnv::FnvHashMap<String, i32> = fnv::FnvHashMap::default();
+        let mut id_map: fnv::FnvHashMap<(String, bool), i32> = fnv::FnvHashMap::default();
 
-        let update_id = |id_map: &mut fnv::FnvHashMap<String, i32>, symbol: &Symbol| {
-            let id = id_map.entry(symbol.name.clone()).or_insert(0);
+        let update_id = |id_map: &mut fnv::FnvHashMap<(String, bool), i32>, symbol: &Symbol| {
+            let id = id_map.entry((symbol.name.clone(), symbol.global)).or_insert(0);
             *id = max(*id, symbol.id);
         };
 
-        expr.traverse(&mut |e| match e.kind {
-                               Let { ref name, .. } => update_id(&mut id_map, name),
-                               Ident(ref sym) => update_id(&mut id_map, sym),
-                               Lambda { ref params, .. } => {
-                                   for ref p in params {
-                                       update_id(&mut id_map, &p.name);
-                                   }
-                               }
-                               _ => {}
-                           });
+        for global in expr.annotations.run_vars().keys() {
+            update_id(&mut id_map, global);
+        }
+        expr.traverse(&mut |e| {
+            for annot_expr in e.annotations.exprs() {
+                // There should be no Lets or Lambdas in annotation expressions.
+                if let Ident(ref sym) = annot_expr.kind {
+                    update_id(&mut id_map, sym);
+                }
+            }
+            match e.kind {
+                Let { ref name, .. } => update_id(&mut id_map, name),
+                Ident(ref sym) => update_id(&mut id_map, sym),
+                Lambda { ref params, .. } => {
+                    for ref p in params {
+                        update_id(&mut id_map, &p.name);
+                    }
+                }
+                _ => {}
+            }
+        });
 
         SymbolGenerator { id_map: id_map }
     }
 
     pub fn new_symbol(&mut self, name: &str) -> Symbol {
-        let id = self.id_map.entry(name.to_owned()).or_insert(-1);
+        let id = self.id_map.entry((name.to_owned(), false)).or_insert(-1);
         *id += 1;
         Symbol {
             name: name.to_owned(),
             id: *id,
+            global: false
+        }
+    }
+
+    pub fn new_global(&mut self, name: &str) -> Symbol {
+        let id = self.id_map.entry((name.to_owned(), true)).or_insert(-1);
+        *id += 1;
+        Symbol {
+            name: name.to_owned(),
+            id: *id,
+            global: true
         }
     }
 
     /// Return the next ID that will be given to a symbol with the given string name.
-    pub fn next_id(&self, name: &str) -> i32 {
-        match self.id_map.get(name) {
+    pub fn next_id(&self, name: &str, global: bool) -> i32 {
+        match self.id_map.get(&(name.to_owned(), global)) {
             Some(id) => id + 1,
             None => 0,
         }

@@ -3,13 +3,15 @@
 //! This transform walks each SIR function and attempts to evaluate expressions at runtime,
 //! deleting definitions and variables which evaluate to simple constants.
 //! 
-//! The transform in conservative in two ways:
+//! The transform in conservative in three ways:
 //! 
 //! 1. It will not remove symbols required by terminators, in case a code generator relies on the
 //! existence of these symbols.
 //! 
 //! 2. It will not remove symbols which are used as parameters to a function (though this can
 //!    probably be changed to support a simple inteprocedural constant simplification).
+//! 
+//! 3. It will not remove symbols that refer to global variables.
 
 use std::collections::BTreeMap;
 
@@ -88,6 +90,10 @@ fn evaluate_binop(kind: BinOpKind, left: LiteralKind, right: LiteralKind) -> Wel
 pub fn fold_constants(prog: &mut SirProgram) -> WeldResult<()> {
 
     let ref mut parameters = fnv::FnvHashSet::default();
+
+    for (name, _) in prog.global_vars.iter() {
+        parameters.insert(name.clone());
+    }
 
     // Collect all the Symbols passed between functions. We will keep the
     // definitions of these symbols intact (even if we assign simple literal
