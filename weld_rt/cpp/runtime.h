@@ -32,7 +32,9 @@ typedef struct profile_stats_t {
 
 // statistics for the vw-greedy algorithm
 typedef struct vw_greedy_stats_t {
-  int32_t flavor;
+  int32_t best_flavor;
+  int32_t explore_flavor;
+  int32_t explore_remaining;
   int32_t explore_period;
   int32_t explore_length;
   int32_t exploit_period;
@@ -42,7 +44,7 @@ typedef struct vw_greedy_stats_t {
 
 // work item
 struct work_t {
-  // task flavors
+  // available flavors for this task
   flavor_t *flavors;
   // [lower, upper) gives the range of iteration indices for this task
   // it is [0, 0) if the task is not a loop body
@@ -96,6 +98,8 @@ struct work_t {
   profile_stats_t *profile;
   // some stastics specifically for the adaptive vw-greedy algorithm
   vw_greedy_stats_t *vw_greedy;
+  // flavor that was picked for this task
+  int32_t flavor;
 };
 
 typedef struct work_t work_t;

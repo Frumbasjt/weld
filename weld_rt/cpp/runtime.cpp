@@ -263,11 +263,11 @@ static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors,
   // TODO: only do this for n_flavors > 1
   task->vw_greedy = (vw_greedy_stats_t *)calloc(1, sizeof(vw_greedy_stats_t));
   if (n_flavors > 1) {
-    task->vw_greedy->explore_period = get_run_data()->explore_period;
-    task->vw_greedy->explore_length = get_run_data()->explore_length;
-    task->vw_greedy->exploit_period = get_run_data()->exploit_period;
+    task->vw_greedy->explore_period = rd->explore_period;
+    task->vw_greedy->explore_length = rd->explore_length;
+    task->vw_greedy->exploit_period = rd->exploit_period;
     task->vw_greedy->phase_end = task->vw_greedy->explore_length;
-    task->vw_greedy->explore_start = task->vw_greedy->explore_length;
+    task->vw_greedy->explore_start = 0;
   }
   task->profile = (profile_stats_t *)calloc(1, sizeof(profile_stats_t));
   task->profile->task_id = id;
@@ -631,12 +631,13 @@ static inline int32_t get_best_flavor(run_data *rd, work_t *task) {
 
 pthread_mutex_t vw_greedy_lock;
 static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
+  // fprintf(stderr, "calls: %d\tphase_end: %d\tflavor: %d\n", task->profile->calls, task->vw_greedy->phase_end, task->flavor);
   pthread_mutex_lock(&vw_greedy_lock);
   task->profile->tot_cycles += cycles;
   task->profile->tot_tuples += task->upper - task->lower;
   task->profile->calls++;
-  task->flavors[task->vw_greedy->flavor].calls++;
-  task->flavors[task->vw_greedy->flavor].last_called = task->profile->calls;
+  task->flavors[task->flavor].calls++;
+  task->flavors[task->flavor].last_called = task->profile->calls;
 
   if (task->flavor_count > 1 && task->profile->calls == task->vw_greedy->phase_end) {
     // TODO: there will be tasks that started before this happens,
@@ -645,17 +646,18 @@ static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
     // which indicates with which flavor it actually ran.
     profile_stats_t profile = *task->profile;
     vw_greedy_stats_t vw_greedy = *task->vw_greedy;
-    task->flavors[task->vw_greedy->flavor].avg_cost = (double) (task->profile->tot_cycles - task->profile->prev_cycles) /
+    task->flavors[task->flavor].avg_cost = (double) (task->profile->tot_cycles - task->profile->prev_cycles) /
                                             (task->profile->tot_tuples - task->profile->prev_tuples);
 
     if (task->profile->calls > task->vw_greedy->explore_start) {
       // fprintf(stderr, "EXPLORE\n");
       task->vw_greedy->explore_start += task->vw_greedy->explore_period;
-      task->vw_greedy->flavor = get_lru_flavor(rd, task);
-      task->vw_greedy->phase_end += task->vw_greedy->exploit_period;
+      task->vw_greedy->explore_flavor = get_lru_flavor(rd, task);
+      task->vw_greedy->explore_remaining = task->vw_greedy->explore_length;
+      task->vw_greedy->phase_end += task->vw_greedy->explore_length;
     } else {
       // fprintf(stderr, "EXPLOIT\n");
-      task->vw_greedy->flavor = get_best_flavor(rd, task);
+      task->vw_greedy->best_flavor = get_best_flavor(rd, task);
       task->vw_greedy->phase_end += task->vw_greedy->exploit_period;
     }
 
@@ -690,7 +692,12 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
       if (!setjmp(rd->work_loop_roots[my_id])) {
         // Get variation to run
         // int32_t choice = get_function_variation(rd, popped);
-        int32_t choice = popped->vw_greedy->flavor;
+        int32_t explore_remaining = popped->vw_greedy->explore_remaining;
+        while(explore_remaining && !__sync_bool_compare_and_swap(&popped->vw_greedy->explore_remaining, explore_remaining, explore_remaining - 1)) {
+          explore_remaining = popped->vw_greedy->explore_remaining;
+        }
+        int32_t choice = explore_remaining ? popped->vw_greedy->explore_flavor : popped->vw_greedy->best_flavor;
+        popped->flavor = choice;
 
         // Run variation
         uint64_t start = get_cycles();

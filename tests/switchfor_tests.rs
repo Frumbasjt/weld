@@ -11,14 +11,14 @@ fn double_identical_switched_loops() {
     let code = "
         |x:vec[i32]|
         let bld=appender[i32];
-        result(switchfor(
+        result(@(grain_size:1000)switchfor(
             |lb,ub|for(x,bld,|b,i,e|merge(b,e)),
             |lb,ub|for(x,bld,|b,i,e|merge(b,e))
         ))";
     let ref conf = default_conf();
 
     let mut input_vec: Vec<i32> = vec![];
-    for i in 0..100000 {
+    for i in 0..200000 {
         input_vec.push(i);
     }
     let ref input_data: WeldVec<i32> = WeldVec {
