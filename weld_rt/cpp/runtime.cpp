@@ -109,7 +109,7 @@ struct run_data {
   int32_t explore_period;
   int32_t explore_length;
   int32_t exploit_period;
-  vector<profile_stats_t*> profile_data;
+  FILE *profile_out;
 };
 
 map<int64_t, run_data*> *runs;
@@ -251,7 +251,7 @@ static inline work_t *clone_task(work_t *task) {
   return clone;
 }
 
-static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors, int64_t lower, int64_t upper, int32_t grain_size) {
+static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors, int64_t lower, int64_t upper, int32_t grain_size, run_data *rd) {
   work_t *task = (work_t *)calloc(1, sizeof(work_t));
   task->flavors = flavors;
   task->flavor_count = n_flavors;
@@ -274,15 +274,15 @@ static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors,
   return task;
 }
 
-static inline work_t *new_task(int64_t id, par_func_t fp, void *data, int64_t lower, int64_t upper, int32_t grain_size) {
+static inline work_t *new_task(int64_t id, par_func_t fp, void *data, int64_t lower, int64_t upper, int32_t grain_size, run_data *rd) {
   flavor_t *flavor = (flavor_t *)calloc(1, sizeof(flavor_t));
   flavor->fp = fp;
   flavor->data = data;
-  return new_task(id, flavor, 1, lower, upper, grain_size);
+  return new_task(id, flavor, 1, lower, upper, grain_size, rd);
 }
 
-static inline work_t *new_task(int64_t id, par_func_t fp, void *data) {
-  return new_task(id, fp, data, 0, 0, 0);
+static inline work_t *new_task(int64_t id, par_func_t fp, void *data, run_data *rd) {
+  return new_task(id, fp, data, 0, 0, 0, rd);
 }
 
 static inline bool defered_is_initialized(run_data *rd, int32_t defered_id) {
@@ -311,7 +311,7 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       bool should_build = false;
       da->cond_func(&should_build);
       if (should_build) {
-        work_t *build_task = new_task(-5, da->build_func, da->build_params);
+        work_t *build_task = new_task(-5, da->build_func, da->build_params, rd);
         insert_cont(task, build_task);
         cont->deps = 1;
         // build_task->cont = task->cont;
@@ -353,7 +353,7 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
         // fprintf(stderr, "done compiling %d\n", flavor->func_id);
       }
       delete to_compile;
-    }, (void *)to_compile);
+    }, (void *)to_compile, rd);
 
     return compile_task;
   }
@@ -366,7 +366,9 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
 static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   if (task->cont == NULL) {
     task->profile->end_cycle = get_cycles();
-    // fprintf(stderr, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+    if (rd->profile_out != NULL) {
+      fprintf(rd->profile_out, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+    }
     if (!task->continued) {
       // if this task has no continuation and there was no for loop to end it,
       // the computation is over
@@ -375,6 +377,7 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
     for (int i = 0; i < task->flavor_count; i++) {
       // free(task->flavors[i].data);
     }
+    // free(task->profile);
     // free(task->flavors);
   } else {
     int32_t previous = __sync_fetch_and_sub(&task->cont->deps, 1);
@@ -408,7 +411,9 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
       }
       // free(task->flavors);
       // fprintf(stderr, "finished task, moving on\n");
-      // fprintf(stderr, "%lld, %lld, %lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+      if (rd->profile_out != NULL) {
+        fprintf(rd->profile_out, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+      }
       if (task->flavor_count > 1) {
         for (int i = 0; i < task->flavor_count; i++) {
           break;
@@ -419,6 +424,7 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
         }
       }
     }
+    // free(task->profile);
     if (task->full_task) {
       free(task->nest_idxs);
       free(task->nest_task_ids);
@@ -445,6 +451,7 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
     par_func_t cont, int64_t lower, int64_t upper, int32_t grain_size, int32_t flavor_count) {
 
   // fprintf(stderr, "weld_rt_start_switch\n");
+  run_data *rd = get_run_data();
   int64_t next_task_id = w->task_id + 1;
 
   // If the body has an instrumented flavor, we'll make a separate task for it that 
@@ -452,7 +459,7 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
   work_t *instrumented_task = NULL;
   if (flavor_count > 1 && body_flavors[0].instrumented_globals_count > 0 && upper - lower > grain_size) {
     // fprintf(stderr, "creating instrumented task\n");
-    instrumented_task = new_task(next_task_id++, body_flavors, 1, lower, lower + grain_size, grain_size);
+    instrumented_task = new_task(next_task_id++, body_flavors, 1, lower, lower + grain_size, grain_size, rd);
     // The body task will skip the instrumented flavor.
     flavor_count--;
     flavor_t *tmp = (flavor_t *)malloc(sizeof(flavor_t) * flavor_count);
@@ -463,14 +470,14 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
 
   // Create task for the body, and set it as continuation for the instrumented version
   // if it exists.
-  work_t *body_task = new_task(next_task_id++, body_flavors, flavor_count, lower, upper, grain_size);
+  work_t *body_task = new_task(next_task_id++, body_flavors, flavor_count, lower, upper, grain_size, rd);
   if (instrumented_task != NULL) {
     set_cont(instrumented_task, body_task);
   }
 
   // Create task for final continuation of body, which inherits the current
   // task continuation.
-  work_t *cont_task = new_task(next_task_id++, cont, cont_data);
+  work_t *cont_task = new_task(next_task_id++, cont, cont_data, rd);
   cont_task->cur_idx = w->cur_idx;
   set_cont(body_task, cont_task);
   if (w != NULL) {
@@ -510,7 +517,6 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
   }
 
   int32_t my_id = weld_rt_thread_id();
-  run_data *rd = get_run_data();
   pthread_spin_lock(rd->all_work_queue_locks + my_id);
   if (new_outer_task2 != NULL) {
     // fprintf(stderr, "push new_outer_task2\n");
@@ -783,8 +789,14 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   rd->explore_period = explore_period;
   rd->explore_length = explore_length;
   rd->exploit_period = exploit_period;
+  rd->profile_out = NULL;
 
-  work_t *run_task = new_task(0, run, data);
+  if (getenv("WELD_PROFILE") != NULL) {
+    rd->profile_out = fopen("profile.csv", "w");
+    fprintf(rd->profile_out, "task_id,start,finish\n");
+  }
+
+  work_t *run_task = new_task(0, run, data, rd);
   // this initial task can be thought of as a continuation
   set_full_task(run_task);
   rd->all_work_queues[0].push_front(run_task);
@@ -822,6 +834,11 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   delete [] rd->all_work_queue_locks;
   delete [] rd->all_work_queues;
   delete [] rd->workers;
+
+  if (rd->profile_out != NULL) {
+    fclose(rd->profile_out);
+  }
+
   return my_run_id;
 }
 
@@ -887,6 +904,7 @@ extern "C" int64_t weld_run_memory_usage(int64_t run_id) {
 }
 
 extern "C" void weld_run_dispose(int64_t run_id) {
+  // printf("weld_run_dispose\n");
   run_data *rd = get_run_data_by_id(run_id);
   assert(rd->done);
   for (map<intptr_t, int64_t>::iterator it = rd->allocs.begin(); it != rd->allocs.end(); it++) {

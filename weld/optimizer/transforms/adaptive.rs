@@ -220,7 +220,7 @@ pub fn adaptive(expr: &mut Expr) {
                                               sym_gen.new_symbol("lb_sym"), 
                                               sym_gen.new_symbol("ub_sym")).unwrap();
 
-                let const_05_expr = literal_expr(F64Literal(0.5f64.to_bits())).unwrap();
+                let const_02_expr = literal_expr(F64Literal(0.2f64.to_bits())).unwrap();
                 let const_00_expr = literal_expr(F64Literal(0.0f64.to_bits())).unwrap();
                 let const_false_expr = literal_expr(BoolLiteral(false)).unwrap();
                 for bf_data in adaptive_data.bf_data.values() {
@@ -231,7 +231,7 @@ pub fn adaptive(expr: &mut Expr) {
                     let dict_hit_expr = ident_expr(bf_data.dict_hit_sym().clone(), Scalar(F64)).unwrap();
                     let cond1_expr = binop_expr(BinOpKind::GreaterThan, dict_try_expr.clone(), const_00_expr.clone()).unwrap();
                     let divide_expr = binop_expr(BinOpKind::Divide, dict_hit_expr, dict_try_expr).unwrap();
-                    let cond2_expr = binop_expr(BinOpKind::LessThan, divide_expr, const_05_expr.clone()).unwrap();
+                    let cond2_expr = binop_expr(BinOpKind::LessThan, divide_expr, const_02_expr.clone()).unwrap();
                     let if_expr = if_expr(cond1_expr, cond2_expr, const_false_expr.clone()).unwrap();
                     prev.annotations.set_defered_until(Box::new(if_expr));
 
@@ -249,7 +249,6 @@ pub fn adaptive(expr: &mut Expr) {
         expr.annotations.push_run_var(sym.clone(), val.clone());
     }
 }
-
 
 fn gen_bloomfilter(dict_ident: &Expr, sym_gen: &mut SymbolGenerator) -> WeldResult<Expr> {
     if let Ident(ref dict_sym) = dict_ident.kind {
