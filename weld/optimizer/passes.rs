@@ -81,7 +81,6 @@ impl Pass {
         let mut continue_pass = true;
         let mut before = expr.hash_ignoring_symbols()?;
         while continue_pass {
-            println!("{}", self.pass_name);
             for transform in self.transforms.iter() {
                 // Skip experimental transformations unless the flag is explicitly set.
                 if transform.experimental && !use_experimental {

@@ -29,13 +29,11 @@ impl Uniquify for Expr {
             symbol_stack.push_symbol(sym.clone());
         }
         for sym in self.annotations.run_vars().keys() {
-            println!("A");
             if let Ok(ref new_sym) = symbol_stack.symbol(sym.clone()) {
                 if new_sym.id > 0 {
                     return compile_err!("Global variable with name {} defined more than once.", sym);
                 }
             }
-            println!("B");
         }
         uniquify_helper(self, &mut symbol_stack)
     }

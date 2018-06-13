@@ -120,7 +120,7 @@ pub fn apply_opt_passes(expr: &mut Expr,
                         use_adaptive: bool) -> WeldResult<()> {
     for pass in opt_passes {
         let start = PreciseTime::now();
-        let changed = pass.transform(expr, use_experimental, use_adaptive)?;
+        pass.transform(expr, use_experimental, use_adaptive)?;
         let end = PreciseTime::now();
         stats.pass_times.push((pass.pass_name(), start.to(end)));
         debug!("After {} pass:\n{}", pass.pass_name(), expr.pretty_print());

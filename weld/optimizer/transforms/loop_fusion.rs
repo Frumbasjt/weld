@@ -396,7 +396,6 @@ fn simple_vertical_loop_fusion() {
                                    appender, |b,h,f| merge(b, f+1))");
     fuse_loops_vertical(&mut e1);
     let e2 = typed_expression("for([1,2,3], appender, |b,i,e| merge(b, (e+2)+1))");
-    println!("{}", print_expr_without_indent(&e1));
     assert!(e1.compare_ignoring_symbols(&e2).unwrap());
 
     // Three loops.
