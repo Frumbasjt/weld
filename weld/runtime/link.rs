@@ -25,8 +25,7 @@ pub struct vec_output {
 
 #[no_mangle]
 pub unsafe extern "C" fn weld_rt_compile_func(module: *mut WeldModule, func_id: int32_t) -> (extern "C" fn(*mut work_t) -> ()) {
-    // TODO: better error handling
-    let mut module_ref = &mut *module;
+    let module_ref = &mut *module;
     llvm::compile_lazy_function(&mut module_ref.llvm_module, func_id as sir::FunctionId).unwrap()
 }
 

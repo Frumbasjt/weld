@@ -1127,95 +1127,6 @@ fn sir_param_correction(prog: &mut SirProgram) -> WeldResult<()> {
     Ok(())
 }
 
-fn sir_get_used_syms(prog: &mut SirProgram, 
-                     func_id: FunctionId, 
-                     used_syms: &mut HashSet<Symbol>, 
-                     visited: &mut HashSet<FunctionId>) {
-
-    if !visited.insert(func_id) {
-        return;
-    }
-
-    for block in prog.funcs[func_id].blocks.clone() {
-        for statement in block.statements {
-            for sym in statement.kind.children() {
-                used_syms.insert(sym.clone());
-            }
-
-            // make recursive call for other functions referenced by statements
-            match statement.kind {
-                StatementKind::DeferedAssign { build_func, cond_func, .. } => {
-                    sir_get_used_syms(prog, build_func, used_syms, visited);
-                    sir_get_used_syms(prog, cond_func, used_syms, visited);
-                }
-                _ => {}
-            }
-        }
-        for sym in block.terminator.children() {
-            used_syms.insert(sym.clone());
-        }
-
-        // make recursive call for other functions referenced by terminator
-        for next_func in block.terminator.functions() {
-            sir_get_used_syms(prog, next_func, used_syms, visited);
-        }
-    }
-}
-
-fn sir_remove_unused(prog: &mut SirProgram) -> WeldResult<()> {
-    loop {
-        let mut changed = false;
-        let mut used_syms = HashSet::new();
-        let mut visited = HashSet::new();
-        for name in prog.global_vars.keys() {
-            used_syms.insert(name.clone());
-        }
-        for name in prog.funcs[0].params.keys() {
-            used_syms.insert(name.clone());
-        }
-
-        sir_get_used_syms(prog, 0, &mut used_syms, &mut visited);
-
-        for func in prog.funcs.iter_mut() {
-            for sym in func.params.clone().keys() {
-                if !used_syms.contains(sym) {
-                    func.params.remove(sym);
-                    changed = true;
-                }
-            }
-            for sym in func.locals.clone().keys() {
-                if !used_syms.contains(sym) {
-                    func.locals.remove(sym);
-                    changed = true;
-                }
-            }
-            let mut i = 0;
-            for block in func.blocks.clone() {
-                let mut new_statements = vec![];
-                for statement in block.statements {
-                    if let Some(ref sym) = statement.output {
-                        if used_syms.contains(sym) {
-                            new_statements.push(statement.clone());
-                        } else {
-                            changed = true;
-                        }
-                    } else {
-                        new_statements.push(statement.clone());
-                    }
-                }
-                func.blocks[i].statements = new_statements;
-                i += 1;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
 /// Convert an AST to a SIR program. Symbols must be unique in expr.
 pub fn ast_to_sir(expr: &Expr, multithreaded: bool, lazy_compilation: bool) -> WeldResult<SirProgram> {
     if let ExprKind::Lambda { ref params, ref body } = expr.kind {
@@ -1259,8 +1170,6 @@ pub fn ast_to_sir(expr: &Expr, multithreaded: bool, lazy_compilation: bool) -> W
         sir_param_correction(&mut prog)?;
         // look for defered assignments and inject getdefered runtime calls where necessary
         sir_inject_get_defered(&mut prog)?;
-        // remove unused symbols
-        // sir_remove_unused(&mut prog)?;
 
         Ok(prog)
     } else {

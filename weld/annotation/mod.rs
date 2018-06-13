@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use ast::Expr;
 use ast::Symbol;
-use optimizer::transforms::adaptive::AdaptiveLoopData;
-use optimizer::transforms::adaptive::AdaptiveBloomFilterData;
+use optimizer::transforms::adaptive_bloomfilter::AdaptiveLoopData;
+use optimizer::transforms::adaptive_bloomfilter::AdaptiveBloomFilterData;
 use ast::PrettyPrint;
 
 /// A kind of annotation that can be set on an expression.
@@ -28,7 +28,9 @@ pub enum AnnotationKind {
     SwitchInstrumented,
     SwitchIfInitialized,
     AdaptiveBloomFilter,
-    AdaptiveLoop
+    AdaptiveLoop,
+    AdaptivePredication,
+    IgnoreTransform
 }
 
 impl fmt::Display for AnnotationKind {
@@ -51,7 +53,9 @@ impl fmt::Display for AnnotationKind {
                    AnnotationKind::SwitchInstrumented => "switch_instrumented",
                    AnnotationKind::SwitchIfInitialized => "switch_if_initialized",
                    AnnotationKind::AdaptiveBloomFilter => "adaptive_bloomfilter",
-                   AnnotationKind::AdaptiveLoop => "adaptive_loop"
+                   AnnotationKind::AdaptiveLoop => "adaptive_loop",
+                   AnnotationKind::AdaptivePredication => "adaptive_predication",
+                   AnnotationKind::IgnoreTransform => "ignore_transform"
                })
     }
 }
@@ -74,6 +78,22 @@ impl fmt::Display for BuilderImplementationKind {
     }
 }
 
+/// A annotation value for a type of transformation that should be ignored for an expression and its children.
+#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub enum IgnoreTransformKind {
+    AdaptivePredication
+}
+
+impl fmt::Display for IgnoreTransformKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use annotation::IgnoreTransformKind::*;
+        let text = match *self {
+            AdaptivePredication => "adaptive_predication"
+        };
+        f.write_str(text)
+    }
+}
+
 /// An internal representation of annotation values.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AnnotationValue {
@@ -91,9 +111,11 @@ pub enum AnnotationValue {
     VSwitchIfInitialized(Vec<Expr>),
     VAdaptiveBloomFilter(AdaptiveBloomFilterData),
     VAdaptiveLoop(AdaptiveLoopData),
+    VIgnoreTransform(Vec<IgnoreTransformKind>),
     VPredicate,
     VVectorize,
     VAlwaysUseRuntime,
+    VAdaptivePredication,
 }
 
 impl fmt::Display for AnnotationValue {
@@ -120,10 +142,14 @@ impl fmt::Display for AnnotationValue {
                     },
                     AnnotationValue::VAdaptiveBloomFilter(ref v) => format!("{}", v.dict_sym()),
                     AnnotationValue::VAdaptiveLoop(_) => "true".to_string(),
+                    AnnotationValue::VIgnoreTransform(ref v) => {
+                        v.iter().map(|t| format!("{}", t)).collect::<Vec<_>>().join(",")
+                    },
                     // These are flags, so their existence indicates that the value is `true`.
                     AnnotationValue::VPredicate => "true".to_string(),
                     AnnotationValue::VVectorize => "true".to_string(),
                     AnnotationValue::VAlwaysUseRuntime => "true".to_string(),
+                    AnnotationValue::VAdaptivePredication => "true".to_string()
                })
     }
 }
@@ -430,6 +456,41 @@ impl Annotations {
             }
         }
         None
+    }
+
+    pub fn adaptive_predication(&self) -> bool {
+        return self.values.contains_key(&AnnotationKind::AdaptivePredication);
+    }
+
+    pub fn set_adaptive_predication(&mut self, val: bool) {
+        if val {
+            self.values.insert(AnnotationKind::AdaptivePredication, AnnotationValue::VAdaptivePredication);
+        } else {
+            self.values.remove(&AnnotationKind::AdaptivePredication);
+        }
+    }
+
+    pub fn ignore_transforms(&self) -> Vec<IgnoreTransformKind> {
+        if let Some(v) = self.values.get(&AnnotationKind::IgnoreTransform) {
+            if let AnnotationValue::VIgnoreTransform(ref vec) = * v {
+                return vec.clone();
+            }
+        }
+        vec![]
+    }
+
+    pub fn set_ignore_transforms(&mut self, transforms: Vec<IgnoreTransformKind>) {
+        self.values.insert(AnnotationKind::IgnoreTransform, AnnotationValue::VIgnoreTransform(transforms));
+    }
+
+    pub fn push_ignore_transform(&mut self, transform: IgnoreTransformKind) {
+        let v = self.values
+                    .entry(AnnotationKind::IgnoreTransform)
+                    .or_insert(AnnotationValue::VIgnoreTransform(vec![]));
+        
+        if let AnnotationValue::VIgnoreTransform(ref mut vec) = *v {
+            vec.push(transform);
+        }
     }
 
     pub fn is_empty(&self) -> bool {

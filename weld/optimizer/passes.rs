@@ -12,7 +12,9 @@ use super::transforms::short_circuit;
 use super::transforms::annotator;
 use super::transforms::vectorizer;
 use super::transforms::unroller;
-use super::transforms::adaptive;
+use super::transforms::adaptive_bloomfilter;
+use super::transforms::adaptive_filter_map;
+use super::transforms::adaptive_predication;
 
 use std::collections::HashMap;
 
@@ -79,6 +81,7 @@ impl Pass {
         let mut continue_pass = true;
         let mut before = expr.hash_ignoring_symbols()?;
         while continue_pass {
+            println!("{}", self.pass_name);
             for transform in self.transforms.iter() {
                 // Skip experimental transformations unless the flag is explicitly set.
                 if transform.experimental && !use_experimental {
@@ -148,14 +151,15 @@ lazy_static! {
                  Pass::new(vec![Transformation::new(annotator::force_iterate_parallel_fors)],
                  "fix-iterate"));
         m.insert("adapt-reorder-filter-projection",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive::reorder_filter_projection)],
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_filter_map::reorder_filter_projection)],
                  "adapt-reorder-filter-projection"));
         m.insert("adapt-bloomfilter",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive::adaptive_bloomfilter)],
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_bloomfilter::adaptive_bf_phase_1),
+                                Transformation::new_adaptive(adaptive_bloomfilter::adaptive_bf_phase_2)],
                  "adapt-bloomfilter"));
-        m.insert("adaptive",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive::adaptive)],
-                 "adaptive"));
+        m.insert("adapt-predicate",
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_predication::adaptive_predication)],
+                 "adapt-predicate"));
         m
     };
 }
