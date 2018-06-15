@@ -155,6 +155,11 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     let mut expr = syntax::macro_processor::process_program(program)?;
     debug!("After macro substitution:\n{}\n", expr.pretty_print());
 
+    let ref timestamp = format!("{}", time::now().to_timespec().nsec);
+    if conf.dump_code.enabled {
+        write_code(expr.pretty_print().as_ref(), "weld", timestamp, &conf.dump_code.dir);
+    }
+
     let start = PreciseTime::now();
     expr.uniquify()?;
     let end = PreciseTime::now();
@@ -215,12 +220,10 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
     trace!("LLVM program:\n{}\n", &llvm_code);
     stats.weld_times.push(("LLVM Codegen".to_string(), start.to(end)));
 
-    let ref timestamp = format!("{}", time::now().to_timespec().nsec);
-
     // Dump files if needed. Do this here in case the actual LLVM code gen fails.
     if conf.dump_code.enabled {
         info!("Writing code to directory '{}' with timestamp {}", &conf.dump_code.dir.display(), timestamp);
-        write_code(expr.pretty_print().as_ref(), "weld", timestamp, &conf.dump_code.dir);
+        write_code(expr.pretty_print().as_ref(), "weld", &format!("{}-opt", timestamp), &conf.dump_code.dir);
         write_code(&format!("{}", &sir_prog), "sir", timestamp, &conf.dump_code.dir);
         write_code(&llvm_code, "ll", timestamp, &conf.dump_code.dir);
     }
