@@ -137,8 +137,9 @@ fn print_iters(iters: &Vec<Iter>, config: &mut PrettyPrintConfig) -> String {
     }
 
     if iters.len() > 1 {
-        format!("zip({}{}{}{}{})",
+        format!("zip({}{}{}{}{}{})",
                 newline,
+                indent_str,
                 iter_strs.join(&format!(",{}{}", newline, indent_str)),
                 indent_str,
                 newline,

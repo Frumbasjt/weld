@@ -114,13 +114,16 @@ pub fn adaptive_predication(expr: &mut Expr) {
 // or not (false).
 fn get_combinations(num_ifs: u32) -> Vec<Vec<bool>> {
     let mut bit_vecs = vec![];
-    for i in 0..u32::pow(2, num_ifs as u32) {
-        let mut bit_vec = vec![];
-        for j in 0..num_ifs {
-            let bit = i & (1 << j) != 0;
-            bit_vec.push(bit);
-        }
-        bit_vecs.push(bit_vec);
-    }
+    // for i in 0..u32::pow(2, num_ifs as u32) {
+    //     let mut bit_vec = vec![];
+    //     for j in 0..num_ifs {
+    //         let bit = i & (1 << j) != 0;
+    //         bit_vec.push(bit);
+    //     }
+    //     bit_vecs.push(bit_vec);
+    // }
+    // For now limit the number of combinations because of code explosion
+    bit_vecs.push(vec![false; num_ifs as usize]);
+    bit_vecs.push(vec![true; num_ifs as usize]);
     return bit_vecs;
 }
