@@ -65,10 +65,14 @@ pub fn adaptive_predication(expr: &mut Expr) {
                             safe = false;
                         });
                         if safe {
-                            let mut res = e.clone();
-                            res.annotations.set_adaptive_predication(true);
-                            marked += 1;
-                            return Ok((Some(res), true));
+                            if let Scalar(_) = on_true.ty {
+                                if let Scalar(_) = on_false.ty {
+                                    let mut res = e.clone();
+                                    res.annotations.set_adaptive_predication(true);
+                                    marked += 1;
+                                    return Ok((Some(res), true));
+                                }
+                            }
                         }
                     }
                 }
