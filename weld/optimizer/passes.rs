@@ -52,14 +52,6 @@ impl Transformation {
             adaptive: true,
         }
     }
-
-    pub fn new_experiment_adaptive(func: PassFn) -> Transformation {
-        Transformation {
-            func: func,
-            experimental: true,
-            adaptive: true,
-        }
-    }
 }
 
 #[derive(Clone)]

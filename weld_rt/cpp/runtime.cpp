@@ -702,7 +702,7 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
         // Run variation
         uint64_t start = get_cycles();
         __sync_bool_compare_and_swap(&popped->profile->start_cycle, 0, start);
-        // fprintf(stderr, "thread %d: task %lld var %d\n", my_id, popped->task_id, choice);
+        // fprintf(stdout, "thread %d: task %lld var %d | lo: %d hi %d\n", my_id, popped->task_id, choice, popped->lower, popped->upper);
         flavor_t flavor = popped->flavors[choice];
         flavor.fp(popped, choice);
         // popped->flavors[choice].fp(popped, choice);

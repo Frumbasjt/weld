@@ -7,18 +7,19 @@ mod common;
 use common::*;
 
 #[test]
-fn double_identical_switched_loops() {
+fn seq_double_identical_switched_loops() {
     let code = "
         |x:vec[i32]|
         let bld=appender[i32];
-        result(@(grain_size:1000)switchfor(
+        result(@(grain_size:100)switchfor(
             |lb,ub|for(x,bld,|b,i,e|merge(b,e)),
             |lb,ub|for(x,bld,|b,i,e|merge(b,e))
         ))";
-    let ref conf = default_conf();
+    let mut conf = default_conf();
+    conf.set("weld.optimization.passes", "");
 
     let mut input_vec: Vec<i32> = vec![];
-    for i in 0..200000 {
+    for i in 0..20000 {
         input_vec.push(i);
     }
     let ref input_data: WeldVec<i32> = WeldVec {
@@ -26,7 +27,37 @@ fn double_identical_switched_loops() {
         len: input_vec.len() as i64,
     };
 
-    let ret_value = compile_and_run(code, conf, input_data);
+    let ret_value = compile_and_run(code, &conf, input_data);
+    let data = ret_value.data() as *const WeldVec<i32>;
+    let result = unsafe { (*data).clone() };
+    assert_eq!(result.len as usize, input_vec.len());
+    for i in 0..(result.len as isize) {
+        assert_eq!(unsafe { *result.data.offset(i) as i32 }, input_vec[i as usize])
+    }
+}
+
+#[test]
+fn parallel_double_identical_switched_loops() {
+    let code = "
+        |x:vec[i32]|
+        let bld=appender[i32];
+        result(@(grain_size:100)switchfor(
+            |lb,ub|for(x,bld,|b,i,e|merge(b,e)),
+            |lb,ub|for(x,bld,|b,i,e|merge(b,e))
+        ))";
+    let mut conf = many_threads_conf();
+    conf.set("weld.optimization.passes", "");
+
+    let mut input_vec: Vec<i32> = vec![];
+    for i in 0..20000 {
+        input_vec.push(i);
+    }
+    let ref input_data: WeldVec<i32> = WeldVec {
+        data: input_vec.as_ptr(),
+        len: input_vec.len() as i64,
+    };
+
+    let ret_value = compile_and_run(code, &conf, input_data);
     let data = ret_value.data() as *const WeldVec<i32>;
     let result = unsafe { (*data).clone() };
     assert_eq!(result.len as usize, input_vec.len());
