@@ -1109,6 +1109,17 @@ impl Expr {
         }
     }
 
+    pub fn traverse_and_continue<F>(&self, func: &mut F)
+        where F: FnMut(&Expr) -> bool 
+    {
+        let cont = func(self);
+        if cont {
+            for c in self.children() {
+                c.traverse_and_continue(func);
+            }
+        }
+    }
+
     /// Returns `true` if this expression contains the symbol `sym` in an `Ident`.
     pub fn contains_symbol(&self, sym: &Symbol) -> bool {
         let mut found = false;
