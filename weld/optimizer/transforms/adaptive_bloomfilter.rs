@@ -276,6 +276,9 @@ fn gen_bloomfilter(dict_ident: &Expr, sym_gen: &mut SymbolGenerator) -> WeldResu
 pub fn adaptive_bf_phase_1(expr: &mut Expr) {
     let mut sym_gen = SymbolGenerator::from_expression(&expr);
     expr.transform_and_continue(&mut |ref mut e| {
+        if let SwitchFor { .. } = e.kind {
+            return (None, false);
+        }
         if let For { .. } = e.kind {
             // Prevent infinite loops (we never need more than one pass)
             if let Some(data) = e.annotations.adaptive_loop() {
