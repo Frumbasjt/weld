@@ -236,7 +236,7 @@ pub fn remove_unused_for_data(expr: &mut Expr) {
 
                 // If not all iters were used, transform the for loop
                 if !used_all && used_indices.len() < iters.len() && used_indices.len() > 0 {
-                    if let Struct(ref types) = params[2].ty {
+                    if let Struct(_) = params[2].ty {
                         // Create new iterators
                         let mut new_iters = used_indices.iter().map(|idx| iters[*idx as usize].clone()).collect::<Vec<_>>();
 

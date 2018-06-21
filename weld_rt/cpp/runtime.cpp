@@ -693,7 +693,7 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
         // Get variation to run
         // int32_t choice = get_function_variation(rd, popped);
         int32_t explore_remaining = popped->vw_greedy->explore_remaining;
-        while(explore_remaining && !__sync_bool_compare_and_swap(&popped->vw_greedy->explore_remaining, explore_remaining, explore_remaining - 1)) {
+        while (explore_remaining && !__sync_bool_compare_and_swap(&popped->vw_greedy->explore_remaining, explore_remaining, explore_remaining - 1)) {
           explore_remaining = popped->vw_greedy->explore_remaining;
         }
         int32_t choice = explore_remaining ? popped->vw_greedy->explore_flavor : popped->vw_greedy->best_flavor;

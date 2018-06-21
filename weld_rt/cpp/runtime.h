@@ -158,6 +158,8 @@ struct vec_builder {
 };
 
 extern "C" {
+  void weld_rt_print_i64(int64_t val);
+  
   void weld_runtime_init();
 
   // weld_rt functions can only be called from a runtime thread that is executing a Weld computation

@@ -10,6 +10,7 @@ use error::WeldResult;
 use ast::ScalarKind::*;
 use ast::LiteralKind::*;
 use annotation::Annotations;
+use optimizer::transforms::adaptive_common::is_inner_loop;
 
 #[cfg(test)]
 use tests::typed_expression;
@@ -279,6 +280,9 @@ pub fn adaptive_bf_phase_1(expr: &mut Expr) {
         if let SwitchFor { .. } = e.kind {
             return (None, false);
         }
+        // if !is_inner_loop(e) {
+        //     return (None, false);
+        // }
         if let For { .. } = e.kind {
             // Prevent infinite loops (we never need more than one pass)
             if let Some(data) = e.annotations.adaptive_loop() {

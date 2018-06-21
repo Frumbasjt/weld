@@ -571,7 +571,7 @@ impl LlvmGenerator {
     fn gen_unload_arg_struct(&mut self, 
                              params_sorted: &BTreeMap<Symbol, Type>, 
                              suffix: &str, 
-                             flavor_idx: usize, 
+                             _flavor_idx: usize, 
                              ctx: &mut FunctionContext) -> WeldResult<()> {
 
         let ref struct_ty = Struct(params_sorted.values().map(|e| e.clone()).collect());
@@ -1477,7 +1477,7 @@ impl LlvmGenerator {
         let bld_param_str = llvm_symbol(&par_for.builder);
         let bld_arg_str = llvm_symbol(&par_for.builder_arg);
         ctx.code.add(format!("store {} {}.in, {}* {}", &bld_ty_str, bld_param_str, &bld_ty_str, bld_arg_str));
-        if par_for.innermost {
+        if par_for.innermost || par_for.switched {
             ctx.add_alloca("%cur.idx", "i64")?;
         } else {
             ctx.code.add("%cur.idx = getelementptr inbounds %work_t, %work_t* %cur.work, i32 0, i32 3");
@@ -4764,7 +4764,7 @@ impl LlvmGenerator {
                                         max_local_bytes));
                 self.gen_store_var(&bld_tmp, &llvm_symbol(output), &bld_ty_str, ctx);
             }
-            VecMerger(ref elem, ref op) => {
+            VecMerger(ref elem, _) => {
                 match args.len() {
                     1 => {
                         let arg_ty = self.llvm_type(&Vector(elem.clone()))?;

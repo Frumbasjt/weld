@@ -2,6 +2,11 @@
 #include "bf.h"
 
 __attribute__((always_inline))
+extern "C" void weld_rt_print_i64(int64_t val) {
+  printf("%lld\n", val);
+}
+
+__attribute__((always_inline))
 extern "C" void *weld_rt_get_merger_at_index(void *m, int64_t size, int32_t i) {
   intptr_t ptr = reinterpret_cast<intptr_t>(m);
   ptr = (ptr + (CACHE_LINE - 1)) & CACHE_MASK;
