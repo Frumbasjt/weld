@@ -15,6 +15,7 @@ use super::transforms::unroller;
 use super::transforms::adaptive_bloomfilter;
 use super::transforms::adaptive_filter_map;
 use super::transforms::adaptive_predication;
+use super::transforms::adaptive_common;
 
 use std::collections::HashMap;
 
@@ -142,15 +143,18 @@ lazy_static! {
                  Pass::new(vec![Transformation::new(annotator::force_iterate_parallel_fors)],
                  "fix-iterate"));
         m.insert("adapt-reorder-filter-projection",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive_filter_map::reorder_filter_projection),
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_common::adaptive_normalize_fors),
+                                Transformation::new_adaptive(adaptive_filter_map::reorder_filter_projection),
                                 Transformation::new_adaptive(adaptive_filter_map::remove_unused_for_data)],
                  "adapt-reorder-filter-projection"));
         m.insert("adapt-bloomfilter",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive_bloomfilter::adaptive_bf_phase_1),
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_common::adaptive_normalize_fors),
+                                Transformation::new_adaptive(adaptive_bloomfilter::adaptive_bf_phase_1),
                                 Transformation::new_adaptive(adaptive_bloomfilter::adaptive_bf_phase_2)],
                  "adapt-bloomfilter"));
         m.insert("adapt-predicate",
-                 Pass::new(vec![Transformation::new_adaptive(adaptive_predication::adaptive_predication)],
+                 Pass::new(vec![Transformation::new_adaptive(adaptive_common::adaptive_normalize_fors),
+                                Transformation::new_adaptive(adaptive_predication::adaptive_predication)],
                  "adapt-predicate"));
         m
     };
