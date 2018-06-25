@@ -10,7 +10,7 @@ use error::WeldResult;
 use ast::ScalarKind::*;
 use ast::LiteralKind::*;
 use annotation::Annotations;
-use optimizer::transforms::adaptive_common::is_inner_loop;
+use optimizer::transforms::adaptive_common::*;
 
 #[cfg(test)]
 use tests::typed_expression;
@@ -277,7 +277,7 @@ fn gen_bloomfilter(dict_ident: &Expr, sym_gen: &mut SymbolGenerator) -> WeldResu
 pub fn adaptive_bf_phase_1(expr: &mut Expr) {
     let mut sym_gen = SymbolGenerator::from_expression(&expr);
     expr.transform_and_continue(&mut |ref mut e| {
-        if let SwitchFor { .. } = e.kind {
+        if contains_switchfor(e) {
             return (None, false);
         }
         // if !is_inner_loop(e) {

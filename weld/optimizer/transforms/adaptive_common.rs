@@ -35,6 +35,24 @@ pub fn is_inner_loop(expr: &mut Expr) -> bool {
     }
 }
 
+/// Check whether the expression is a switchfor, or a for loop with a nested switchfor.
+pub fn contains_switchfor(expr: &Expr) -> bool {
+    match expr.kind {
+        SwitchFor { .. } => true,
+        For { .. } => {
+            let mut contains_switchfor = false;
+            expr.traverse_and_continue(&mut |ref mut e| {
+                if let SwitchFor { .. } = e.kind {
+                    contains_switchfor = true;
+                }
+                !contains_switchfor
+            });
+            contains_switchfor
+        },
+        _ => false
+    }
+}
+
 /// For a For expression, check if any of its data is not an identity expression. If so, replace them
 /// with identity expressions, and prepend the for expression by corresponding let expressions.
 pub fn extract_non_ident_iters(expr: &mut Expr, sym_gen: &mut SymbolGenerator) -> WeldResult<Option<Expr>> {

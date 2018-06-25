@@ -10,14 +10,14 @@ use error::WeldResult;
 use ast::ScalarKind::*;
 use ast::LiteralKind::*;
 use annotation::Annotations;
+use optimizer::transforms::adaptive_common::*;
 
 pub fn reorder_filter_projection(expr: &mut Expr) {
     let mut sym_gen = SymbolGenerator::from_expression(&expr);
     expr.transform_and_continue_res(&mut |ref mut expr| {
-        if let SwitchFor { .. } = expr.kind {
+        if contains_switchfor(expr) {
             return Ok((None, false));
         }
-
         if let For { ref iters, builder: ref init_builder, ref func } = expr.kind {
             if let Some ( _ ) = valid_builder(init_builder) {
                 if let Lambda { ref params, ref body } = func.kind {

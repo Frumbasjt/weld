@@ -5,14 +5,15 @@ use ast::constructors::*;
 use util::SymbolGenerator;
 use annotation::Annotations;
 use annotation::IgnoreTransformKind;
+use optimizer::transforms::adaptive_common::*;
 
 pub fn adaptive_predication(expr: &mut Expr) {
     let mut sym_gen = SymbolGenerator::from_expression(&expr);
     expr.transform_and_continue_res(&mut |ref mut expr| {
-        if let SwitchFor { .. } = expr.kind {
+        if expr.annotations.ignore_transforms().contains(&IgnoreTransformKind::AdaptivePredication) {
             return Ok((None, false));
         }
-        if expr.annotations.ignore_transforms().contains(&IgnoreTransformKind::AdaptivePredication) {
+        if contains_switchfor(expr) {
             return Ok((None, false));
         }
         if let For { ref func, .. } = expr.kind {
