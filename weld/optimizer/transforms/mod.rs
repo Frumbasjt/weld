@@ -12,3 +12,4 @@ pub mod adaptive_bloomfilter;
 pub mod adaptive_filter_map;
 pub mod adaptive_predication;
 pub mod adaptive_common;
+pub mod normalizer;

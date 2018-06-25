@@ -16,6 +16,7 @@ use super::transforms::adaptive_bloomfilter;
 use super::transforms::adaptive_filter_map;
 use super::transforms::adaptive_predication;
 use super::transforms::adaptive_common;
+use super::transforms::normalizer;
 
 use std::collections::HashMap;
 
@@ -107,6 +108,10 @@ lazy_static! {
                  Pass::new(vec![Transformation::new(inliner::inline_let)], "inline-let"));
         m.insert("inline-zip",
                  Pass::new(vec![Transformation::new(inliner::inline_zips)], "inline-zip"));
+        m.insert("normalizer",
+                 Pass::new(vec![Transformation::new(normalizer::normalize_merge_ifs),
+                                Transformation::new(normalizer::normalize_conditions)],
+                 "normalizer"));
         m.insert("loop-fusion",
                  Pass::new(vec![Transformation::new(loop_fusion::fuse_loops_vertical),
                                 Transformation::new(loop_fusion_2::fuse_loops_2),
