@@ -265,6 +265,7 @@ type SiteSymbolMap = fnv::FnvHashMap<StatementKind, Symbol>;
 
 struct StatementTracker {
     generated: fnv::FnvHashMap<ProgramSite,SiteSymbolMap>,
+    in_for: bool
 }
 
 impl StatementTracker {
@@ -272,6 +273,7 @@ impl StatementTracker {
     pub fn new() -> StatementTracker {
         StatementTracker {
             generated: fnv::FnvHashMap::default(),
+            in_for: false,
         }
     }
 
@@ -391,6 +393,7 @@ pub struct ParallelForData {
     pub body: FunctionId,
     pub cont: FunctionId,
     pub innermost: bool,
+    pub outermost: bool,
     /// If the for loop is part of a pipeline in a SwitchFor. In this case the runtime is never used.
     pub switched: bool,
     /// If the for loop is the first in one of the pipeline in a SwitchFor. Implies switched is true.
@@ -771,14 +774,15 @@ impl fmt::Display for Terminator {
                 }
                 write!(f, "] ")?;
                 write!(f,
-                       "{} {} {} {} F{} F{} {}",
+                       "{} {} {} {} F{} F{} innermost={} outermost={}",
                        pf.builder,
                        pf.builder_arg,
                        pf.idx_arg,
                        pf.data_arg,
                        pf.body,
                        pf.cont,
-                       pf.innermost)?;
+                       pf.innermost,
+                       pf.outermost)?;
                 Ok(())
             }
             SwitchFor(ref sf) => {
@@ -1762,6 +1766,7 @@ fn gen_expr(expr: &Expr,
             ref builder,
             ref func,
         } => {
+            let is_outermost = !tracker.in_for;
             if let ExprKind::Lambda {
                        ref params,
                        ref body,
@@ -1780,6 +1785,7 @@ fn gen_expr(expr: &Expr,
                 let mut cur_func = cur_func;
                 let mut cur_block = cur_block;
                 let mut pf_iters: Vec<ParallelForIter> = Vec::new();
+                tracker.in_for = false;
                 for iter in iters.iter() {
                     let data_res = gen_expr(&iter.data, prog, cur_func, cur_block, tracker, multithreaded, lazy_compilation, adaptive_tracker)?;
 
@@ -1808,8 +1814,12 @@ fn gen_expr(expr: &Expr,
                                       strides: strides_sym,
                                   });
                 }
+
+                tracker.in_for = true;
                 let (body_end_func, body_end_block, _) =
                     gen_expr(body, prog, body_func, body_block, tracker, multithreaded, lazy_compilation, adaptive_tracker)?;
+                tracker.in_for = !is_outermost;
+
                 prog.funcs[body_end_func].blocks[body_end_block].terminator = EndFunction;
                 let cont_func = prog.add_func();
                 let cont_block = prog.funcs[cont_func].add_block();
@@ -1827,6 +1837,7 @@ fn gen_expr(expr: &Expr,
                                     body: body_func,
                                     cont: cont_func,
                                     innermost: is_innermost,
+                                    outermost: is_outermost,
                                     switched: adaptive_tracker.in_switch,
                                     switch_entry: false,
                                     always_use_runtime: if adaptive_tracker.in_switch { false } else { expr.annotations.always_use_runtime() },
