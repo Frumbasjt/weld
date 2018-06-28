@@ -110,6 +110,7 @@ struct run_data {
   int32_t explore_length;
   int32_t exploit_period;
   FILE *profile_out;
+  FILE *adaptive_log_out;
 };
 
 map<int64_t, run_data*> *runs;
@@ -311,12 +312,12 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       bool should_build = false;
       da->cond_func(&should_build);
       if (should_build) {
+        if (rd->adaptive_log_out) {
+          fprintf(rd->adaptive_log_out, "Creating new task for defered assign\n");
+        }
         work_t *build_task = new_task(-5, da->build_func, da->build_params, rd);
         insert_cont(task, build_task);
         cont->deps = 1;
-        // build_task->cont = task->cont;
-        // build_task->deps++;
-        // task->cont = build_task;
       }
     }
   }
@@ -335,7 +336,6 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       }
 
       if (compile) {
-        // fprintf(stderr, "PUSHED FLAVOR TO COMPILE\n");
         to_compile->push_back(flavor);
       }
     }
@@ -346,11 +346,16 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
     work_t *compile_task = new_task(-10, [](work_t *t, int32_t f) { 
       vector<flavor_t*> *to_compile = (vector<flavor_t*> *)t->flavors[0].data;
       // TODO: change weld_rt_compile_func so it accepts a vector of functions to compile
-      void *module = get_run_data()->module;
+      run_data *rd = get_run_data();
+      void *module = rd->module;
       for (auto const& flavor : *to_compile) {
-        // fprintf(stderr, "started compiling %d\n", flavor->func_id);
+        if (rd->adaptive_log_out) {
+          fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
+        }
         flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
-        // fprintf(stderr, "done compiling %d\n", flavor->func_id);
+        if (rd->adaptive_log_out) {
+          fprintf(rd->adaptive_log_out, "Done compiling f%d\n", flavor->func_id);
+        }
       }
       delete to_compile;
     }, (void *)to_compile, rd);
@@ -410,17 +415,15 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
         // free(task->flavors[i].data);
       }
       // free(task->flavors);
-      // fprintf(stderr, "finished task, moving on\n");
+
+      // Log profiling info
       if (rd->profile_out != NULL) {
         fprintf(rd->profile_out, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
       }
-      if (task->flavor_count > 1) {
+      // Log adaptive info
+      if (task->flavor_count > 1 && rd->adaptive_log_out) {
         for (int i = 0; i < task->flavor_count; i++) {
-          break;
-          fprintf(stderr, "Task %lld var %d: last_avg_cost=%f calls=%d\n", 
-                          task->task_id, i, 
-                          task->flavors[i].avg_cost,
-                          task->flavors[i].calls);
+          fprintf(rd->adaptive_log_out, "Task %lld flavor %d: calls=%d\n", task->task_id, i, task->flavors[i].calls);
         }
       }
     }
@@ -454,11 +457,17 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
   run_data *rd = get_run_data();
   int64_t next_task_id = w->task_id + 1;
 
+  if (rd->adaptive_log_out && flavor_count > 1) {
+    fprintf(rd->adaptive_log_out, "Starting switchfor...\n");
+  }
+
   // If the body has an instrumented flavor, we'll make a separate task for it that 
   // must be run first. The instrumented flavor is always the first flavor.
   work_t *instrumented_task = NULL;
   if (flavor_count > 1 && body_flavors[0].instrumented_globals_count > 0 && upper - lower > grain_size) {
-    // fprintf(stderr, "creating instrumented task\n");
+    if (rd->adaptive_log_out) {
+      fprintf(rd->adaptive_log_out, "Creating instrumented task (id=%lld)\n", next_task_id);
+    }
     instrumented_task = new_task(next_task_id++, body_flavors, 1, lower, lower + grain_size, grain_size, rd);
     // The body task will skip the instrumented flavor.
     flavor_count--;
@@ -519,19 +528,15 @@ extern "C" void weld_rt_start_switch(work_t *w, flavor_t *body_flavors, void *co
   int32_t my_id = weld_rt_thread_id();
   pthread_spin_lock(rd->all_work_queue_locks + my_id);
   if (new_outer_task2 != NULL) {
-    // fprintf(stderr, "push new_outer_task2\n");
     (rd->all_work_queues + my_id)->push_front(new_outer_task2);
   }
   if (new_outer_task1 != NULL) {
-    // fprintf(stderr, "push new_outer_task1\n");
     (rd->all_work_queues + my_id)->push_front(new_outer_task1);
   }
   if (instrumented_task != NULL) {
-    // fprintf(stderr, "push instrumented_task %lld\n", instrumented_task->task_id);
     (rd->all_work_queues + my_id)->push_front(instrumented_task);
   } 
   else {
-    // fprintf(stderr, "push body_task %lld\n", body_task->task_id);
     (rd->all_work_queues + my_id)->push_front(body_task);
   }
   pthread_spin_unlock(rd->all_work_queue_locks + my_id);
@@ -797,10 +802,21 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   rd->explore_length = explore_length;
   rd->exploit_period = exploit_period;
   rd->profile_out = NULL;
+  rd->adaptive_log_out = NULL;
 
+  // Setup files for logging
+  char *profile_log_param = getenv("WELD_PROFILE");
   if (getenv("WELD_PROFILE") != NULL) {
-    rd->profile_out = fopen("profile.csv", "w");
+    char file_path [13 + strlen(profile_log_param)];
+    sprintf(file_path, "profile-%s.csv", profile_log_param);
+    rd->profile_out = fopen(file_path, "w");
     fprintf(rd->profile_out, "task_id,start,finish\n");
+  }
+  char *adaptive_log_param = getenv("WELD_LOG_ADAPTIVE");
+  if (adaptive_log_param != NULL) {
+    char file_path [13 + strlen(adaptive_log_param)];
+    sprintf(file_path, "adaptive-%s.log", adaptive_log_param);
+    rd->adaptive_log_out = fopen(file_path, "w");
   }
 
   work_t *run_task = new_task(0, run, data, rd);
