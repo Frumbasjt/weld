@@ -20,10 +20,12 @@ pub const LLVM_OPTIMIZATION_LEVEL_KEY: &'static str = "weld.llvm.optimization.le
 pub const DUMP_CODE_KEY: &'static str = "weld.compile.dumpCode";
 pub const DUMP_CODE_DIR_KEY: &'static str = "weld.compile.dumpCodeDir";
 pub const ADAPTIVE_LAZY_COMPILATION_KEY: &'static str = "weld.adaptive.lazyCompilation";
-pub const ADAPTIVE_EXPLORE_PERIOD_KEY: &'static str = "weld.apaptive.explorePeriod";
-pub const ADAPTIVE_EXPLORE_LENGTH_KEY: &'static str = "weld.apaptive.exploreLength";
-pub const ADAPTIVE_EXPLOIT_PERIOD_KEY: &'static str = "weld.apaptive.exploitPeriod";
+pub const ADAPTIVE_EXPLORE_PERIOD_KEY: &'static str = "weld.adaptive.explorePeriod";
+pub const ADAPTIVE_EXPLORE_LENGTH_KEY: &'static str = "weld.adaptive.exploreLength";
+pub const ADAPTIVE_EXPLOIT_PERIOD_KEY: &'static str = "weld.adaptive.exploitPeriod";
 pub const PARALLEL_NESTED_LOOPS_KEY: &'static str = "weld.compile.parallelNestedLoops";
+pub const LOG_ADAPTIVE_KEY: &'static str = "weld.log.adaptive";
+pub const LOG_PROFILE_KEY: &'static str = "weld.log.profile";
 
 // Default values of each key
 pub const DEFAULT_MEMORY_LIMIT: i64 = 1000000000;
@@ -40,10 +42,12 @@ pub const DEFAULT_ADAPTIVE_EXPLORE_PERIOD: i32 = 128;
 pub const DEFAULT_ADAPTIVE_EXPLOIT_PERIOD: i32 = 32;
 pub const DEFAULT_ADAPTIVE_EXPLORE_LENGTH: i32 = 4;
 pub const DEFAULT_PARALLEL_NESTED_LOOPS: bool = true;
+pub const DEFAULT_LOG_ADAPTIVE: bool = false;
+pub const DEFAULT_LOG_PROFILE: bool = false;
 
 lazy_static! {
     pub static ref DEFAULT_OPTIMIZATION_PASSES: Vec<Pass> = {
-        let m = ["normalizer", "loop-fusion", "unroll-static-loop", "infer-size", 
+        let m = ["loop-fusion", "unroll-static-loop", "infer-size", 
                  "adapt-reorder-filter-projection", "adapt-bloomfilter", "adapt-predicate",
                  "short-circuit-booleans", "predicate", "vectorize", "fix-iterate"];
         m.iter().map(|e| (*OPTIMIZATION_PASSES.get(e).unwrap()).clone()).collect()
@@ -76,6 +80,8 @@ pub struct ParsedConf {
     pub explore_length: i32,
     pub exploit_period: i32,
     pub parallel_nested_loops: bool,
+    pub log_adaptive: bool,
+    pub log_profile: bool,
 }
 
 /// Parse a configuration from a WeldConf key-value dictionary.
@@ -149,6 +155,14 @@ pub fn parse(conf: &WeldConf) -> WeldResult<ParsedConf> {
     let parallel_nested_loops = value.map(|s| parse_bool_flag(&s, "Invalid flag for parallelNestedLoops"))
                       .unwrap_or(Ok(DEFAULT_PARALLEL_NESTED_LOOPS))?;
 
+    let value = get_value(conf, LOG_ADAPTIVE_KEY);
+    let log_adaptive = value.map(|s| parse_bool_flag(&s, "Invalid flag for log.adaptive"))
+                       .unwrap_or(Ok(DEFAULT_LOG_ADAPTIVE))?;
+
+    let value = get_value(conf, LOG_PROFILE_KEY);
+    let log_profile = value.map(|s| parse_bool_flag(&s, "Invalid flag for log.profile"))
+                       .unwrap_or(Ok(DEFAULT_LOG_PROFILE))?;
+
     Ok(ParsedConf {
         memory_limit: memory_limit,
         threads: threads,
@@ -168,6 +182,8 @@ pub fn parse(conf: &WeldConf) -> WeldResult<ParsedConf> {
         explore_length: adaptive_explore_length,
         exploit_period: adaptive_exploit_period,
         parallel_nested_loops: parallel_nested_loops,
+        log_adaptive: log_adaptive,
+        log_profile: log_profile,
     })
 }
 

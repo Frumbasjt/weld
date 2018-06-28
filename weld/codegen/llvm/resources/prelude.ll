@@ -91,7 +91,7 @@ declare i32 @puts(i8* nocapture) nounwind
 
 declare void    @weld_rt_print_i64(i64)
 
-declare i64     @weld_run_begin(void (%work_t*, i32)*, i8*, i64, i32, i8*, i32, i32, i32)
+declare i64     @weld_run_begin(void (%work_t*, i32)*, i8*, i64, i32, i8*, i32, i32, i32, i1, i1)
 declare i8*     @weld_run_get_result(i64)
 
 declare i8*     @weld_run_malloc(i64, i64)
@@ -162,7 +162,7 @@ declare void    @weld_rt_set_defered_result(i32, i8*)
 %vb.out = type { i8*, i64 }
 
 ; Input argument (input data pointer, nworkers, mem_limit, module pointer, explore period, explore length, explore period)
-%input_arg_t = type { i64, i32, i64, i64, i32, i32, i32 }
+%input_arg_t = type { i64, i32, i64, i64, i32, i32, i32, i1, i1 }
 ; Return type (output data pointer, run ID, errno)
 %output_arg_t = type { i64, i64, i64 }
 

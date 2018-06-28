@@ -374,6 +374,8 @@ impl WeldModule {
                              explore_period: parsed_conf.explore_period,
                              explore_length: parsed_conf.explore_length,
                              exploit_period: parsed_conf.exploit_period,
+                             log_profile: parsed_conf.log_profile,
+                             log_adaptive: parsed_conf.log_adaptive,
                          });
         let ptr = Box::into_raw(input) as i64;
 

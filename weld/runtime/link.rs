@@ -3,7 +3,7 @@
 //! These functions should not be called by users of Weld - they are exposed because LLVM cannot
 //! resolve them unless they are marked with `pub`.
 
-use libc::{c_void, int64_t, int32_t, size_t};
+use libc::{c_void, int64_t, int32_t, size_t, int8_t};
 use codegen::llvm;
 use sir;
 use WeldModule;
@@ -79,7 +79,8 @@ extern "C" {
     pub fn weld_rt_free_merger(m: *mut c_void);
     #[no_mangle]
     pub fn weld_run_begin(run: extern "C" fn(*mut work_t), mem_limit: int64_t, n_workers: int32_t,
-        module: *mut c_void, explore_period: int32_t, explore_length: int32_t, exploit_period: int32_t) -> int64_t;
+        module: *mut c_void, explore_period: int32_t, explore_length: int32_t, exploit_period: int32_t,
+        profile_out: int8_t, adaptive_log_out: int8_t) -> int64_t;
     #[no_mangle]
     pub fn weld_run_get_result(run_id: int64_t) -> *mut c_void;
     #[no_mangle]

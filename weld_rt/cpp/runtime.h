@@ -194,7 +194,7 @@ extern "C" {
   // weld_run functions can be called both from a runtime thread and before/after a Weld computation is
   // executed
   int64_t weld_run_begin(par_func_t run, void* data, int64_t mem_limit, int32_t n_workers, void *module,
-    int32_t explore_period, int32_t explore_length, int32_t exploit_period);
+    int32_t explore_period, int32_t explore_length, int32_t exploit_period, bool log_profile, bool log_adaptive);
   void *weld_run_get_result(int64_t run_id);
   void weld_run_dispose(int64_t run_id);
 

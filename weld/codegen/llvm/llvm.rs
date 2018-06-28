@@ -74,6 +74,8 @@ pub struct WeldInputArgs {
     pub explore_period: i32,
     pub explore_length: i32,
     pub exploit_period: i32,
+    pub log_profile: bool,
+    pub log_adaptive: bool,
 }
 
 /// A wrapper for outputs passed out of the Weld runtime.
@@ -2248,6 +2250,8 @@ impl LlvmGenerator {
         run_ctx.code.add(format!("%r.explore_period = extractvalue %input_arg_t %r.inp_val, 4"));
         run_ctx.code.add(format!("%r.explore_length = extractvalue %input_arg_t %r.inp_val, 5"));
         run_ctx.code.add(format!("%r.exploit_period = extractvalue %input_arg_t %r.inp_val, 6"));
+        run_ctx.code.add(format!("%r.log_profile = extractvalue %input_arg_t %r.inp_val, 7"));
+        run_ctx.code.add(format!("%r.log_adaptive = extractvalue %input_arg_t %r.inp_val, 8"));
         // Code to load args and call function
         run_ctx.code.add(format!(
             "%r.args_typed = inttoptr i64 %r.args to {args_type}*
@@ -2277,7 +2281,7 @@ impl LlvmGenerator {
         let typed_out_ptr = run_ctx.var_ids.next();
         let final_address = run_ctx.var_ids.next();
         run_ctx.code.add(format!(
-            "{rid} = call i64 @weld_run_begin(void (%work_t*, i32)* @f0_par, i8* {run_struct}, i64 %r.memlimit, i32 %r.nworkers, i8* %r.module_typed, i32 %r.explore_period, i32 %r.explore_length, i32 %r.exploit_period)
+            "{rid} = call i64 @weld_run_begin(void (%work_t*, i32)* @f0_par, i8* {run_struct}, i64 %r.memlimit, i32 %r.nworkers, i8* %r.module_typed, i32 %r.explore_period, i32 %r.explore_length, i32 %r.exploit_period, i1 %r.log_profile, i1 %r.log_adaptive)
              %res_ptr = call i8* @weld_run_get_result(i64 {rid})
              %res_address = ptrtoint i8* %res_ptr to i64
              {errno} = call i64 @weld_run_get_errno(i64 {rid})
