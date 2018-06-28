@@ -785,6 +785,8 @@ extern "C" void weld_rt_set_defered_result(int32_t id, void* result) {
 extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit, int32_t n_workers, void *module,
     int32_t explore_period, int32_t explore_length, int32_t exploit_period) {
 
+  int64_t my_run_id = __sync_fetch_and_add(&run_id, 1);
+
   run_data *rd = new run_data;
   pthread_mutex_init(&rd->lock, NULL);
   rd->n_workers = n_workers;
@@ -807,15 +809,15 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   // Setup files for logging
   char *profile_log_param = getenv("WELD_PROFILE");
   if (getenv("WELD_PROFILE") != NULL) {
-    char file_path [13 + strlen(profile_log_param)];
-    sprintf(file_path, "profile-%s.csv", profile_log_param);
+    char file_path [18 + strlen(profile_log_param)];
+    sprintf(file_path, "profile-%s-%04ld.csv", profile_log_param, my_run_id);
     rd->profile_out = fopen(file_path, "w");
     fprintf(rd->profile_out, "task_id,start,finish\n");
   }
   char *adaptive_log_param = getenv("WELD_LOG_ADAPTIVE");
   if (adaptive_log_param != NULL) {
-    char file_path [13 + strlen(adaptive_log_param)];
-    sprintf(file_path, "adaptive-%s.log", adaptive_log_param);
+    char file_path [18 + strlen(adaptive_log_param)];
+    sprintf(file_path, "adaptive-%s-%04ld.log", adaptive_log_param, my_run_id);
     rd->adaptive_log_out = fopen(file_path, "w");
   }
 
@@ -824,7 +826,6 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   set_full_task(run_task);
   rd->all_work_queues[0].push_front(run_task);
 
-  int64_t my_run_id = __sync_fetch_and_add(&run_id, 1);
   pthread_mutex_lock(&global_lock);
   (*runs)[my_run_id] = rd;
   pthread_mutex_unlock(&global_lock);
