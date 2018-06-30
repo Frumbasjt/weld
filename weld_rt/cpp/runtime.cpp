@@ -313,7 +313,7 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       da->cond_func(&should_build);
       if (should_build) {
         if (rd->adaptive_log_out) {
-          fprintf(rd->adaptive_log_out, "Creating new task for defered assign\n");
+          fprintf(rd->adaptive_log_out, "Creating new task for defered assign %d\n", da->id);
         }
         work_t *build_task = new_task(-5, da->build_func, da->build_params, rd);
         insert_cont(task, build_task);

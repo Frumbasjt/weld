@@ -2,6 +2,41 @@ use ast::*;
 use ast::ExprKind::*;
 use ast::Type::*;
 
+pub fn if_for(expr: &mut Expr) {
+    expr.transform(&mut |ref mut e| {
+        if let For { ref iters, ref builder, ref func } = e.kind {
+            if iters.len() == 1 {
+                if let If { ref cond, ref on_true, ref on_false } = iters[0].data.kind {
+                    let mut empty_on_true = false;
+                    let mut empty_on_false = false;
+                    if let MakeVector { ref elems } = on_true.kind {
+                        empty_on_true = elems.len() == 0;
+                    }
+                    if let MakeVector { ref elems } = on_false.kind {
+                        empty_on_false = elems.len() == 0;
+                    }
+                    if empty_on_true && empty_on_false {
+                        return Some(*builder.clone());
+                    }
+                    if empty_on_true || empty_on_false {
+                        let new_iter_data = if empty_on_true { *on_false.clone() } else { *on_true.clone() };
+                        let mut new_iter = iters[0].clone();
+                        new_iter.data = Box::new(new_iter_data);
+                        let new_for = constructors::for_expr(vec![new_iter], *builder.clone(), *func.clone(), false).unwrap();
+                        let new_expr = if empty_on_true {
+                            constructors::if_expr(*cond.clone(), *builder.clone(), new_for).unwrap()
+                        } else {
+                            constructors::if_expr(*cond.clone(), new_for, *builder.clone()).unwrap()
+                        };
+                        return Some(new_expr);
+                    }
+                }
+            }
+        }
+        None
+    });
+}
+
 pub fn normalize_merge_ifs(expr: &mut Expr) {
     expr.transform(&mut |ref mut e| {
         if let If { ref cond, ref on_true, ref on_false } = e.kind {

@@ -110,7 +110,8 @@ lazy_static! {
                  Pass::new(vec![Transformation::new(inliner::inline_zips)], "inline-zip"));
         m.insert("normalizer",
                  Pass::new(vec![Transformation::new(normalizer::normalize_merge_ifs),
-                                Transformation::new(normalizer::normalize_conditions)],
+                                Transformation::new(normalizer::normalize_conditions),
+                                Transformation::new(normalizer::if_for)],
                  "normalizer"));
         m.insert("loop-fusion",
                  Pass::new(vec![Transformation::new(loop_fusion::fuse_loops_vertical),
