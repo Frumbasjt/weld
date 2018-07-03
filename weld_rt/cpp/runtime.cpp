@@ -261,14 +261,15 @@ static inline work_t *new_task(int64_t id, flavor_t *flavors, int32_t n_flavors,
   task->cur_idx = lower;
   task->task_id = id,
   task->grain_size = grain_size;
-  // TODO: only do this for n_flavors > 1
   task->vw_greedy = (vw_greedy_stats_t *)calloc(1, sizeof(vw_greedy_stats_t));
   if (n_flavors > 1) {
     task->vw_greedy->explore_period = rd->explore_period;
     task->vw_greedy->explore_length = rd->explore_length;
     task->vw_greedy->exploit_period = rd->exploit_period;
-    task->vw_greedy->phase_end = task->vw_greedy->explore_length;
+    task->vw_greedy->exploit_remaining = task->vw_greedy->exploit_period;
     task->vw_greedy->explore_start = 0;
+    // Will cause vw greedy to pick something else than 0 for the first explore round
+    flavors[0].last_chosen = 1;
   }
   task->profile = (profile_stats_t *)calloc(1, sizeof(profile_stats_t));
   task->profile->task_id = id;
@@ -343,7 +344,7 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
 
   if (!to_compile->empty()) {
     // Create compilation task
-    work_t *compile_task = new_task(-10, [](work_t *t, int32_t f) { 
+    work_t *compile_task = new_task(-10, [](work_t *t, int32_t f) {
       vector<flavor_t*> *to_compile = (vector<flavor_t*> *)t->flavors[0].data;
       // TODO: change weld_rt_compile_func so it accepts a vector of functions to compile
       run_data *rd = get_run_data();
@@ -372,7 +373,13 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   if (task->cont == NULL) {
     task->profile->end_cycle = get_cycles();
     if (rd->profile_out != NULL) {
-      fprintf(rd->profile_out, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+      fprintf(rd->profile_out, "%lld,%lld,%lld,%d,%lld,%lld\n", 
+                                task->task_id, 
+                                task->profile->start_cycle, 
+                                task->profile->end_cycle,
+                                task->profile->calls,
+                                task->profile->tot_cycles,
+                                task->profile->tot_tuples);
     }
     if (!task->continued) {
       // if this task has no continuation and there was no for loop to end it,
@@ -418,7 +425,13 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
 
       // Log profiling info
       if (rd->profile_out != NULL) {
-        fprintf(rd->profile_out, "%lld,%lld,%lld\n", task->task_id, task->profile->start_cycle, task->profile->end_cycle);
+        fprintf(rd->profile_out, "%lld,%lld,%lld,%d,%lld,%lld\n", 
+                                task->task_id, 
+                                task->profile->start_cycle, 
+                                task->profile->end_cycle,
+                                task->profile->calls,
+                                task->profile->tot_cycles,
+                                task->profile->tot_tuples);
       }
       // Log adaptive info
       if (task->flavor_count > 1 && rd->adaptive_log_out) {
@@ -611,11 +624,11 @@ static inline bool is_init_phase(run_data *rd, work_t *task) {
 }
 
 static inline int32_t get_lru_flavor(run_data *rd, work_t *task) {
-  int32_t min_last_called = std::numeric_limits<int32_t>::max();
+  int32_t min_last_chosen = std::numeric_limits<int32_t>::max();
   int32_t flavor = -1;
   for (int32_t i = 0; i < task->flavor_count; i++) {
-    if (may_run(rd, &task->flavors[i]) && task->flavors[i].last_called < min_last_called) {
-      min_last_called = task->flavors[i].last_called;
+    if (may_run(rd, &task->flavors[i]) && task->flavors[i].last_chosen < min_last_chosen) {
+      min_last_chosen = task->flavors[i].last_chosen;
       flavor = i;
     }
   }
@@ -634,44 +647,75 @@ static inline int32_t get_best_flavor(run_data *rd, work_t *task) {
   return flavor;
 }
 
+// TODO: move lock to flavor struct
 pthread_mutex_t vw_greedy_lock;
 static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
-  // fprintf(stderr, "calls: %d\tphase_end: %d\tflavor: %d\n", task->profile->calls, task->vw_greedy->phase_end, task->flavor);
+  // fprintf(stderr, "start update_flavor\n");
   pthread_mutex_lock(&vw_greedy_lock);
+
+  // Update global profile data
   task->profile->tot_cycles += cycles;
   task->profile->tot_tuples += task->upper - task->lower;
   task->profile->calls++;
-  task->flavors[task->flavor].calls++;
-  task->flavors[task->flavor].last_called = task->profile->calls;
 
-  if (task->flavor_count > 1 && task->profile->calls == task->vw_greedy->phase_end) {
-    // TODO: there will be tasks that started before this happens,
-    // but call update_flavor after this has happened. They should NOT contribute to
-    // the average cost of this flavor. Perhaps work_t should get an additional field local_flavor
-    // which indicates with which flavor it actually ran.
-    profile_stats_t profile = *task->profile;
-    vw_greedy_stats_t vw_greedy = *task->vw_greedy;
-    task->flavors[task->flavor].avg_cost = (double) (task->profile->tot_cycles - task->profile->prev_cycles) /
-                                            (task->profile->tot_tuples - task->profile->prev_tuples);
+  // More than one flavor means this is an adaptive task
+  if (task->flavor_count > 1) {
+    int32_t my_id = weld_rt_thread_id();
+    flavor_t *my_flav = &task->flavors[task->flavor];
+    vw_greedy_stats_t *vw_greedy = task->vw_greedy;
 
+    // Update basic stats for flavor
+    my_flav->tot_cycles += cycles;
+    my_flav->tot_tuples += task->upper - task->lower;
+    my_flav->calls++;
+    
+    // Check if we are the exploring or exploiting thread, and if we are done.
+    bool am_explorer = my_id == vw_greedy->explore_thread;
+    if (am_explorer) {
+      vw_greedy->explore_remaining--;
+    } else {
+      vw_greedy->exploit_remaining--;
+    }
+    bool done_exploring = am_explorer && vw_greedy->explore_remaining == 0;
+    bool done_exploiting = !am_explorer && vw_greedy->exploit_remaining == 0;
+    
+    // Update average cost if we're done exploring or exploiting. If we're done exploiting,
+    // update the best flavor as well.
+    if (done_exploring || done_exploiting) {
+      my_flav->avg_cost = (double) (my_flav->tot_cycles - my_flav->prev_cycles) /
+                                            (my_flav->tot_tuples - my_flav->prev_tuples);
+      
+      if (done_exploring) {
+        task->vw_greedy->explore_thread = -1;
+      } else { // done_exploiting == true
+        // fprintf(stderr, "EXPLOIT\n");
+        int32_t exploit_flav_idx = get_best_flavor(rd, task);
+        flavor_t *exploit_flav = &task->flavors[exploit_flav_idx];
+        exploit_flav->last_chosen = task->profile->calls;
+        exploit_flav->prev_cycles = exploit_flav->tot_cycles;
+        exploit_flav->prev_tuples = exploit_flav->tot_tuples;
+        vw_greedy->best_flavor = exploit_flav_idx;
+        vw_greedy->exploit_remaining = vw_greedy->exploit_period;
+        // fprintf(stderr, "chose %d\n", exploit_flav_idx);
+      }
+    }
+    // Check if it's time to explore again.
     if (task->profile->calls > task->vw_greedy->explore_start) {
       // fprintf(stderr, "EXPLORE\n");
-      task->vw_greedy->explore_start += task->vw_greedy->explore_period;
-      task->vw_greedy->explore_flavor = get_lru_flavor(rd, task);
-      task->vw_greedy->explore_remaining = task->vw_greedy->explore_length;
-      task->vw_greedy->phase_end += task->vw_greedy->explore_length;
-    } else {
-      // fprintf(stderr, "EXPLOIT\n");
-      task->vw_greedy->best_flavor = get_best_flavor(rd, task);
-      task->vw_greedy->phase_end += task->vw_greedy->exploit_period;
+      int32_t explore_flav_idx = get_lru_flavor(rd, task);
+      flavor_t *explore_flav = &task->flavors[explore_flav_idx];
+      explore_flav->last_chosen = task->profile->calls;
+      explore_flav->prev_cycles = explore_flav->tot_cycles;
+      explore_flav->prev_tuples = explore_flav->tot_tuples;
+      vw_greedy->explore_thread = my_id;
+      vw_greedy->explore_flavor = explore_flav_idx;
+      vw_greedy->explore_remaining = vw_greedy->explore_length;
+      vw_greedy->explore_start += vw_greedy->explore_period;
+      // fprintf(stderr, "chose %d\n", explore_flav_idx);
     }
-
-    task->profile->prev_tuples = task->profile->tot_tuples;
-    task->profile->prev_cycles = task->profile->tot_cycles;
-
-    // fprintf(stderr, "task %llu: chose flavor %d\n", task->task_id, task->vw_greedy->flavor);
   }
   pthread_mutex_unlock(&vw_greedy_lock);
+  // fprintf(stderr, "end update_flavor\n");
 }
 
 // keeps executing items from the work queue until it is empty
@@ -696,21 +740,19 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
       }
       if (!setjmp(rd->work_loop_roots[my_id])) {
         // Get variation to run
-        // int32_t choice = get_function_variation(rd, popped);
-        int32_t explore_remaining = popped->vw_greedy->explore_remaining;
-        while (explore_remaining && !__sync_bool_compare_and_swap(&popped->vw_greedy->explore_remaining, explore_remaining, explore_remaining - 1)) {
-          explore_remaining = popped->vw_greedy->explore_remaining;
+        int32_t choice;
+        if (popped->vw_greedy->explore_thread == my_id && popped->vw_greedy->explore_remaining > 0) {
+          choice = popped->vw_greedy->explore_flavor;
+        } else {
+          choice = popped->vw_greedy->best_flavor;
         }
-        int32_t choice = explore_remaining ? popped->vw_greedy->explore_flavor : popped->vw_greedy->best_flavor;
         popped->flavor = choice;
 
         // Run variation
         uint64_t start = get_cycles();
         __sync_bool_compare_and_swap(&popped->profile->start_cycle, 0, start);
         // fprintf(stdout, "thread %d: task %lld var %d | lo: %d hi %d\n", my_id, popped->task_id, choice, popped->lower, popped->upper);
-        flavor_t flavor = popped->flavors[choice];
-        flavor.fp(popped, choice);
-        // popped->flavors[choice].fp(popped, choice);
+        popped->flavors[choice].fp(popped, choice);
         uint64_t end = get_cycles();
         
         // Update stats
@@ -759,6 +801,11 @@ static void *thread_func(void *data) {
 extern "C" void weld_rt_defer_build(int32_t id, void (*condition)(bool*), 
   par_func_t build, void* build_params, void** depends_on) {
 
+  run_data *rd = get_run_data();
+  if (rd->adaptive_log_out) {
+    fprintf(rd->adaptive_log_out, "Registered defered build %d\n", id);
+  }
+
   defered_assign *da = (defered_assign *)malloc(sizeof(defered_assign));
   da->id = id;
   da->result = NULL;
@@ -767,7 +814,7 @@ extern "C" void weld_rt_defer_build(int32_t id, void (*condition)(bool*),
   da->build_params = build_params;
   da->depends_on = depends_on;
 
-  get_run_data()->defer_assign_data[id] = da;
+  rd->defer_assign_data[id] = da;
 }
 
 extern "C" void *weld_rt_get_defered_result(int32_t id) {
@@ -775,7 +822,11 @@ extern "C" void *weld_rt_get_defered_result(int32_t id) {
 }
 
 extern "C" void weld_rt_set_defered_result(int32_t id, void* result) {
-  get_run_data()->defer_assign_data[id]->result = result;
+  run_data *rd = get_run_data();
+  if (rd->adaptive_log_out) {
+    fprintf(rd->adaptive_log_out, "Setting defered build result %d\n", id);
+  }
+  rd->defer_assign_data[id]->result = result;
 }
 
 // *** weld_run functions and helpers ***
@@ -810,13 +861,13 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
   int64_t timestamp = time(NULL);
   if (log_profile) {
     char file_path[28];
-    sprintf(file_path, "profile-%010ld-%04ld.csv", timestamp, my_run_id);
+    sprintf(file_path, "profile-%010lld-%04lld.csv", timestamp, my_run_id);
     rd->profile_out = fopen(file_path, "w");
-    fprintf(rd->profile_out, "task_id,start,finish\n");
+    fprintf(rd->profile_out, "task_id,start_cycle,end_cycle,calls,tot_cycles,tot_tuples\n");
   }
   if (log_adaptive) {
     char file_path[28];
-    sprintf(file_path, "adaptive-%010ld-%04ld.log", timestamp, my_run_id);
+    sprintf(file_path, "adaptive-%010lld-%04lld.log", timestamp, my_run_id);
     rd->adaptive_log_out = fopen(file_path, "w");
   }
 
@@ -860,6 +911,9 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
 
   if (rd->profile_out != NULL) {
     fclose(rd->profile_out);
+  }
+  if (rd->adaptive_log_out != NULL) {
+    fclose(rd->adaptive_log_out);
   }
 
   return my_run_id;

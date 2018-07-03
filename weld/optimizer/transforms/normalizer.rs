@@ -2,6 +2,10 @@ use ast::*;
 use ast::ExprKind::*;
 use ast::Type::*;
 
+/// Matches for expression of the form: for(if(c, v1, v2), bld, func)
+/// If v1 or v2 are both empty vector literals, transforms it to bld
+/// If v1 is an empty vector literal, transforms it to if(c, bld, for(v2, bld, func))
+/// If v2 is an empty vector literal, transforms it to if(c, for(v1, bld, func), b)
 pub fn if_for(expr: &mut Expr) {
     expr.transform(&mut |ref mut e| {
         if let For { ref iters, ref builder, ref func } = e.kind {
@@ -37,6 +41,8 @@ pub fn if_for(expr: &mut Expr) {
     });
 }
 
+/// Normalizes expressions of the form if(c, b, merge(b, e)) to if(c, merge(b, e), b).
+/// This allows these expressions to be detected by the predication pass.
 pub fn normalize_merge_ifs(expr: &mut Expr) {
     expr.transform(&mut |ref mut e| {
         if let If { ref cond, ref on_true, ref on_false } = e.kind {
@@ -51,6 +57,13 @@ pub fn normalize_merge_ifs(expr: &mut Expr) {
     });
 }
 
+/// Normalizes conditions such that literals are always on the right side of an equals or
+/// not equals operation.
+/// Normalizes conditions with a binary operation on the left side of the form:
+///     (binop == true) to (binop)
+///     (binop != true) to (inverse(binop))
+///     (binop == false) to (inverse(binop))
+///     (binop != false) to (binop)
 pub fn normalize_conditions(expr: &mut Expr) {
     expr.transform(&mut |ref mut e| {
         if let BinOp { ref kind, ref left, ref right } = e.kind {

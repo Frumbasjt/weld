@@ -149,11 +149,11 @@ declare void    @weld_rt_set_defered_result(i32, i8*)
 
 ; Parallel runtime structures
 ; flavor_t struct in runtime.h
-%flavor_t = type { i8*, void (%work_t*, i32)*, i32, i8**, i32, i32*, i32, i1, i32, i32, double }
+%flavor_t = type { i8*, void (%work_t*, i32)*, i32, i8**, i32, i32*, i32, i1, i32, i32, double, i64, i64, i64, i64 }
 ; profile_stats_t struct in runtime.h
-%profile_stats_t = type { i64, i32, i64, i64, i64, i64, i64, i64 }
+%profile_stats_t = type { i64, i32, i64, i64, i64, i64 }
 ; vw_greedy_stats_t struct in runtime.h
-%vw_greedy_stats_t = type { i32, i32, i32, i32, i32, i32 }
+%vw_greedy_stats_t = type { i32, i32, i32, i32, i32, i32, i32, i32, i32 }
 ; work_t struct in runtime.h
 %work_t = type { %flavor_t*, i64, i64, i64, i32, i64*, i64*, i32, i64, %work_t*, i32, i32, i32, i32, %flavor_t**, %profile_stats_t*, %vw_greedy_stats_t*, i32 }
 ; vec_piece struct in runtime.h

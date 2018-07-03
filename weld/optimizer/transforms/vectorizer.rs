@@ -50,15 +50,17 @@ pub fn vectorize(expr: &mut Expr) {
                         .map(|i| {
                             let mut i = i.clone();
                             i.kind = IterKind::SimdIter;
-                            // If the data is a vector literal, replace it with an identity expression, and keep track of the name
+                            // If the data is not an identity expression, replace it with one, and keep track of the name
                             // so that we can generate a let expression for it later
-                            if let MakeVector { .. } = (*i.data).kind {
+                            if let Ident(_) = (*i.data).kind { 
+                                // Do nothing
+                            } else {
                                 let data = i.data.clone();
                                 let data_name = sym_gen.new_symbol("a");
                                 let data_ty = data.ty.clone();
                                 i.data = Box::new(constructors::ident_expr(data_name.clone(), data_ty).unwrap());
                                 data_names.push((*data, data_name));
-                            };
+                            }
                             i
                         })
                         .collect::<Vec<_>>();

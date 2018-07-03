@@ -47,7 +47,7 @@ pub const DEFAULT_LOG_PROFILE: bool = false;
 
 lazy_static! {
     pub static ref DEFAULT_OPTIMIZATION_PASSES: Vec<Pass> = {
-        let m = ["loop-fusion", "unroll-static-loop", "infer-size", 
+        let m = ["normalizer", "loop-fusion", "unroll-static-loop", "infer-size", 
                  "adapt-reorder-filter-projection", "adapt-bloomfilter", "adapt-predicate",
                  "short-circuit-booleans", "predicate", "vectorize", "fix-iterate"];
         m.iter().map(|e| (*OPTIMIZATION_PASSES.get(e).unwrap()).clone()).collect()

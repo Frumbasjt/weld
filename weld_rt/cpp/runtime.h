@@ -24,8 +24,6 @@ typedef struct profile_stats_t {
   uint32_t calls;
   uint64_t tot_tuples;
   uint64_t tot_cycles;
-  uint64_t prev_tuples;
-  uint64_t prev_cycles;
   uint64_t start_cycle;
   uint64_t end_cycle;
 } profile_stats_t;
@@ -34,12 +32,13 @@ typedef struct profile_stats_t {
 typedef struct vw_greedy_stats_t {
   int32_t best_flavor;
   int32_t explore_flavor;
+  int32_t explore_thread;
+  int32_t explore_start;
   int32_t explore_remaining;
+  int32_t exploit_remaining;
   int32_t explore_period;
   int32_t explore_length;
   int32_t exploit_period;
-  int32_t phase_end;
-  int32_t explore_start;
 } vw_greedy_stats_t;
 
 // work item
@@ -126,10 +125,14 @@ typedef struct flavor_t {
   bool compiling;
   // number of times this flavor was called
   int32_t calls;
-  // number of call when this flavor was last called
-  int32_t last_called;
+  // number of call when this flavor was last chosen for exploration or exploitation
+  int32_t last_chosen;
   // average cost of this flavor in cycles
   double avg_cost;
+  uint64_t tot_tuples;
+  uint64_t tot_cycles;
+  uint64_t prev_tuples;
+  uint64_t prev_cycles;
 } flavor_t;
 
 // VecBuilder structures
