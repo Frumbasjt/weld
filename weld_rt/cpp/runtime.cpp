@@ -12,11 +12,22 @@
 #include "assert.h"
 #include "runtime.h"
 #include <limits>
+#include <time.h>
+#include <sys/time.h>
 
 static inline uint64_t get_cycles() {
   uint64_t a, d;
   __asm volatile("rdtsc" : "=a" (a), "=d" (d));
   return a | (d<<32);
+}
+
+static inline double get_wall_time(){
+    struct timeval time;
+    if (gettimeofday(&time,NULL)){
+        //  Handle error
+        return 0;
+    }
+    return (double)time.tv_sec + (double)time.tv_usec * .000001;
 }
 
 // These is needed to ensure each grain size is divisible by the SIMD vector size. A value of 64
@@ -88,6 +99,7 @@ typedef struct {
   par_func_t build_func;
   void *build_params;
   void **depends_on;
+  bool is_building;
 } defered_assign;
 
 struct run_data {
@@ -305,14 +317,18 @@ static inline bool defered_may_be_initialized(run_data *rd, int32_t defered_id) 
 // as the continuation of the instrumented task. If necessary, a task is also created
 // to compile lazy flavors, which is returned by the function.
 static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data *rd) {
+  if (rd->adaptive_log_out) {
+    fprintf(rd->adaptive_log_out, "Finished instrumented task\n");
+  }
   work_t *cont = task->cont;
   // Check for each defered assign whether it is ready to be built
   for (auto const& entry : rd->defer_assign_data) {
-    const defered_assign *da = entry.second;
-    if (da->result == NULL) {
+    defered_assign *da = entry.second;
+    if (da->result == NULL && !da->is_building) {
       bool should_build = false;
       da->cond_func(&should_build);
       if (should_build) {
+        da->is_building = true;
         if (rd->adaptive_log_out) {
           fprintf(rd->adaptive_log_out, "Creating new task for defered assign %d\n", da->id);
         }
@@ -353,9 +369,11 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
         if (rd->adaptive_log_out) {
           fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
         }
+        double t1 = get_wall_time();
         flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
+        double t2 = get_wall_time();
         if (rd->adaptive_log_out) {
-          fprintf(rd->adaptive_log_out, "Done compiling f%d\n", flavor->func_id);
+          fprintf(rd->adaptive_log_out, "Done compiling f%d (took %fs)\n", flavor->func_id, t2 - t1);
         }
       }
       delete to_compile;
@@ -813,6 +831,7 @@ extern "C" void weld_rt_defer_build(int32_t id, void (*condition)(bool*),
   da->build_func = build;
   da->build_params = build_params;
   da->depends_on = depends_on;
+  da->is_building = false;
 
   rd->defer_assign_data[id] = da;
 }
