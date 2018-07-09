@@ -81,7 +81,8 @@ fn switchfor_instrumented() {
             @(switch_if_initialized:one)
             |lb,ub|for(x,bld,|b,i,e|merge(b,one))
         ))";
-    let ref conf = default_conf();
+    let mut conf = default_conf();
+    conf.set("weld.adaptive.lazyCompilation", "true");
 
     let mut input_vec: Vec<i32> = vec![];
     for i in 0..1000000 {
@@ -92,7 +93,7 @@ fn switchfor_instrumented() {
         len: input_vec.len() as i64,
     };
 
-    let ret_value = compile_and_run(code, conf, input_data);
+    let ret_value = compile_and_run(code, &conf, input_data);
     let data = ret_value.data() as *const i32;
     let result = unsafe { (*data).clone() };
     assert_eq!(result, 1000000);

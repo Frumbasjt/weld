@@ -475,7 +475,7 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
 extern "C" void weld_rt_start_loop(work_t *w, void *body_data, void *cont_data, par_func_t body,
     par_func_t cont, int64_t lower, int64_t upper, int32_t grain_size) {
 
-  flavor_t *flavors = (flavor_t *)malloc(sizeof(flavor_t));
+  flavor_t *flavors = (flavor_t *)calloc(1, sizeof(flavor_t));
   flavors->fp = body;
   flavors->data = body_data;
 
