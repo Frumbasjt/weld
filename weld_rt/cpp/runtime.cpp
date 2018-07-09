@@ -318,7 +318,7 @@ static inline bool defered_may_be_initialized(run_data *rd, int32_t defered_id) 
 // to compile lazy flavors, which is returned by the function.
 static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data *rd) {
   if (rd->adaptive_log_out) {
-    fprintf(rd->adaptive_log_out, "Finished instrumented task\n");
+    fprintf(rd->adaptive_log_out, "Finished instrumented task %lld\n", task->task_id);
   }
   work_t *cont = task->cont;
   // Check for each defered assign whether it is ready to be built
@@ -366,13 +366,14 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       run_data *rd = get_run_data();
       void *module = rd->module;
       for (auto const& flavor : *to_compile) {
+        double t1, t2;
         if (rd->adaptive_log_out) {
           fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
+          t1 = get_wall_time();
         }
-        double t1 = get_wall_time();
         flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
-        double t2 = get_wall_time();
         if (rd->adaptive_log_out) {
+          t2 = get_wall_time();
           fprintf(rd->adaptive_log_out, "Done compiling f%d (took %fs)\n", flavor->func_id, t2 - t1);
         }
       }
@@ -846,6 +847,7 @@ extern "C" void weld_rt_set_defered_result(int32_t id, void* result) {
     fprintf(rd->adaptive_log_out, "Setting defered build result %d\n", id);
   }
   rd->defer_assign_data[id]->result = result;
+  rd->defer_assign_data[id]->is_building = false;
 }
 
 // *** weld_run functions and helpers ***
