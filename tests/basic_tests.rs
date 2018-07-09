@@ -342,6 +342,22 @@ fn flat_map_length() {
 }
 
 #[test]
+fn dict_length() {
+    let code = "|x:vec[i32]| len(result(for(x, dictmerger[i32,i32,+], |b,i,e| merge(b,{e,1}))))";
+    let ref conf = default_conf();
+
+    let input_vec = [2, 3, 4, 2, 1];
+    let ref input_data = WeldVec::from(&input_vec);
+
+    let ret_value = compile_and_run(code, conf, input_data);
+    let data = ret_value.data() as *const i32;
+    let result = unsafe { (*data).clone() };
+
+    let output = 4;
+    assert_eq!(output, result);
+}
+
+#[test]
 fn if_for_loop() {
     let code = "|x:vec[i32], a:i32| if(a > 5, map(x, |e| e+1), map(x, |e| e+2))";
     let ref conf = default_conf();

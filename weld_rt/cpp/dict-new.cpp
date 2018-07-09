@@ -752,7 +752,7 @@ public:
    * @return a buffer of keys.
    *
    * */
-  void* new_k_vector() {
+  void *new_k_vector() {
     assert(finalized);
     InternalDict *dict = global_dict();
 
@@ -771,6 +771,29 @@ public:
     }
     assert(offset == dict->size());
     return (void *)buf;
+  }
+
+  /** Returns an array of hashes, given this dictionary. The dictionary must be 
+   * finalized.
+   *
+   * @return a buffer of hashes.
+   *
+   * */
+  int32_t *new_h_vector() {
+    assert(finalized);
+    InternalDict *dict = global_dict();
+
+    int32_t *buf = (int32_t *)weld_run_malloc(weld_rt_get_run_id(), dict->size() * sizeof(int32_t));
+    long offset = 0;
+
+    for (long i = 0; i < dict->capacity(); i++) {
+      Slot *slot = dict->slot_at_index(i);
+      if (slot->header.filled) {
+        buf[offset++] = slot->header.hash;
+      }
+    }
+    assert(offset == dict->size());
+    return buf;
   }
 
   /** Serializes a dictionary, flattening pointers if necessary. */
@@ -953,6 +976,11 @@ extern "C" void *weld_rt_dict_to_array(void *d, int32_t value_offset,
 extern "C" void *weld_rt_dict_keys_to_array(void *d) {
   WeldDict *wd = (WeldDict *)d;
   return wd->new_k_vector();
+}
+
+extern "C" int32_t *weld_rt_dict_hashes_to_array(const void *d) {
+  WeldDict *wd = (WeldDict *)d;
+  return wd->new_h_vector();
 }
 
 extern "C" int64_t weld_rt_dict_size(void *d) {

@@ -99,6 +99,8 @@ extern "C" void *weld_rt_dict_to_array(void *d, int32_t value_offset, int32_t st
  */
 extern "C" void *weld_rt_dict_keys_to_array(void *d);
 
+extern "C" int32_t *weld_rt_dict_hashes_to_array(const void *d);
+
 /** Returns the size of the dictionary.
  *
  * PRE-REQUISITES: The dictionary must be finalized.

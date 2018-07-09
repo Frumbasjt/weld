@@ -554,12 +554,10 @@ impl InferTypesInternal for Expr {
             }
 
             Length { ref mut data } => {
-                if let Vector(_) = data.ty {
-                    self.ty.push_complete(Scalar(I64))
-                } else if data.ty == Unknown {
-                    Ok(false)
-                } else {
-                    compile_err!("Expected vector type in len, got {}", &data.ty)
+                match data.ty {
+                    Vector(_) | Dict(_, _) => self.ty.push_complete(Scalar(I64)),
+                    Unknown => Ok(false),
+                    _ => compile_err!("Expected vector or dict type in len, got {}", &data.ty)
                 }
             }
 
@@ -746,10 +744,16 @@ impl InferTypesInternal for Expr {
                                 Ok(false)
                             }
                         }
-                        BloomBuilder(_) => {
+                        BloomBuilder(ref ty) => {
                             match arguments.len() {
                                 1 => {
                                     arguments[0].ty.push(&Scalar(I64))
+                                }
+                                2 => {
+                                    let mut changed = false;
+                                    changed |= arguments[0].ty.push(&Scalar(I64))?;
+                                    changed |= arguments[1].ty.push(&Dict(ty.clone(), Box::new(Unknown)))?;
+                                    Ok(changed)
                                 }
                                 _ => {
                                     return compile_err!("Expected single argument in bloombuilder");

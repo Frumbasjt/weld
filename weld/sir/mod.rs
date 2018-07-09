@@ -447,6 +447,12 @@ pub enum Terminator {
     },
     ParallelFor(ParallelForData),
     SwitchFor(SwitchForData),
+    BloomFilterBatchInsert {
+        bloom_builder: Symbol,
+        dict: Symbol,
+        item_ty: Box<Type>,
+        cont: FunctionId,
+    },
     Crash,
 }
 
@@ -488,6 +494,10 @@ impl Terminator {
             }
             DeferedSetResult { ref result, .. } => { vars.push(result); },
             FunctionReturn(ref sym) => { vars.push(sym); },
+            BloomFilterBatchInsert { ref bloom_builder, ref dict, .. } => { 
+                vars.push(bloom_builder);
+                vars.push(dict); 
+            }
             // Explicitly mention those that do not contain children in case more terminators are added later
             JumpBlock(_) => {},
             JumpFunction(_) => {},
@@ -514,6 +524,9 @@ impl Terminator {
                     funcs.push(flavor.for_func);
                 }
                 funcs.push(sf.cont);
+            }
+            BloomFilterBatchInsert { cont, .. } => {
+                funcs.push(cont);
             }
             Branch { .. } => {}
             JumpBlock(_) => {}
@@ -712,7 +725,7 @@ impl fmt::Display for StatementKind {
                 ref args,
                 ref ty,
             } => {
-                let arg_str = join("(", ",", ")", args.iter().map(|e| format!("{}", e)));
+                let arg_str = join("(", ", ", ")", args.iter().map(|e| format!("{}", e)));
                 write!(f, "new {}{}", ty, arg_str)
             }
             Lookup {
@@ -799,6 +812,12 @@ impl fmt::Display for Terminator {
             DeferedSetResult { id, ref result} => write!(f, "@defered_set_result({}, {})", id, result),
             EndFunction => write!(f, "end"),
             Crash => write!(f, "crash"),
+            BloomFilterBatchInsert { 
+                ref bloom_builder, 
+                ref dict, 
+                cont,
+                ..
+            } => write!(f, "bfbatchinsert {} {} F{}", bloom_builder, dict, cont),
         }
     }
 }
@@ -1050,6 +1069,14 @@ fn sir_param_correction_helper(prog: &mut SirProgram,
             JumpFunction(_) => {}
             FunctionReturn(ref sym) => { vars.push(sym.clone()) }
             DeferedSetResult { ref result, .. } => { vars.push(result.clone()) }
+            BloomFilterBatchInsert { 
+                ref bloom_builder, 
+                ref dict, 
+                .. 
+            } => { 
+                vars.push(bloom_builder.clone());
+                vars.push(dict.clone());
+            }
             EndFunction => {}
             Crash => {}
             SwitchFor { .. } => {}
@@ -1097,6 +1124,9 @@ fn sir_param_correction_helper(prog: &mut SirProgram,
             FunctionReturn(_) => {}
             Crash => {}
             DeferedSetResult { .. } => {}
+            BloomFilterBatchInsert { cont, .. } => {
+                sir_param_correction_helper(prog, cont, env, &mut inner_closure, visited);
+            }
         }
         for var in inner_closure {
             if prog.funcs[func_id].locals.get(&var) == None {
@@ -1681,9 +1711,26 @@ fn gen_expr(expr: &Expr,
             // NewBuilder is special, since they are stateful objects - we can't alias them.
             let res_sym = prog.add_local(&expr.ty, cur_func);
             prog.funcs[cur_func].blocks[cur_block].add_statement(Statement::new(Some(res_sym.clone()), NewBuilder {
-                                                                     args: arg_syms,
+                                                                     args: arg_syms.clone(),
                                                                      ty: expr.ty.clone(),
                                                                  }));
+            if let Builder(ref bk, _) = expr.ty {
+                if let BuilderKind::BloomBuilder(ref ty) = bk {
+                    if arg_syms.len() > 1 {
+                        let cont_func = prog.add_func();
+                        let cont_block = prog.funcs[cont_func].add_block();
+                        prog.funcs[cur_func].blocks[cur_block].terminator = BloomFilterBatchInsert {
+                            bloom_builder: res_sym.clone(),
+                            dict: arg_syms[1].clone(),
+                            item_ty: ty.clone(),
+                            cont: cont_func,
+                        };
+                        cur_func = cont_func;
+                        cur_block = cont_block;
+                    }
+                }
+            }
+
             Ok((cur_func, cur_block, res_sym))
         }
 

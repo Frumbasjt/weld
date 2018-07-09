@@ -1274,7 +1274,7 @@ impl LlvmGenerator {
         if par_for.innermost {
             // Determine whether to always call parallel, always call serial, or
             // choose based on the loop's size.
-            if !self.parallel_nested_loops {
+            if !par_for.outermost && !self.parallel_nested_loops {
                 ctx.code.add(format!("br label %for.ser"));
             } else {
                 if par_for.always_use_runtime {
@@ -4812,7 +4812,7 @@ impl LlvmGenerator {
                 }
             }
             BloomBuilder(_) => {
-                if args.len() == 1 {
+                if args.len() > 0 {
                     let (cap_ll_ty, cap_ll_sym) = self.llvm_type_and_name(func, &args[0])?;
                     let (output_ll_ty, output_ll_sym) = self.llvm_type_and_name(func, output)?;
 
@@ -4971,6 +4971,60 @@ impl LlvmGenerator {
                 let errno = WeldRuntimeErrno::Unknown as i64;
                 let run_id = ctx.var_ids.next();
                 ctx.code.add(format!("call void @weld_run_set_errno(i64 {}, i64 {})", run_id, errno));
+            }
+
+            BloomFilterBatchInsert { ref bloom_builder, ref dict, ref item_ty, cont } => {
+                self.gen_top_level_function(sir, &sir.funcs[cont])?;
+                self.gen_loop_continuation_function(&sir.funcs[cont])?;
+
+                // let (bf_ll_ty, bf_ll_sym) = self.llvm_type_and_name(func, bloom_builder)?;
+                // let (items_ll_ty, items_ll_sym) = self.llvm_type_and_name(func, items)?;
+                // let items_prefix = llvm_prefix(&items_ll_ty);
+                // let elem_ty = self.llvm_type(item_ty)?;
+
+                // // Get data for batch insert
+                // let bf_tmp = self.gen_load_var(&bf_ll_sym, &bf_ll_ty, ctx)?;
+                // let items_vec_tmp = self.gen_load_var(&items_ll_sym, &items_ll_ty, ctx)?;
+                // let bf_i8 = ctx.var_ids.next();
+                // let items_tmp = ctx.var_ids.next();
+                // let items_i8 = ctx.var_ids.next();
+                // let num_items = ctx.var_ids.next();
+                // ctx.code.add(format!("{} = bitcast {} {} to i8*", bf_i8, bf_ll_ty, bf_tmp));
+                // ctx.code.add(format!("{} = extractvalue {} {}, 0", items_tmp, items_ll_ty, items_vec_tmp));
+                // ctx.code.add(format!("{} = bitcast {}* {} to i8*", items_i8, elem_ty, items_tmp));
+                // ctx.code.add(format!("{} = call i64 {}.size({} {})", num_items, items_prefix, items_ll_ty, items_vec_tmp));
+
+                let (bf_ll_ty, bf_ll_sym) = self.llvm_type_and_name(func, bloom_builder)?;
+                let (dict_ll_ty, dict_ll_sym) = self.llvm_type_and_name(func, dict)?;
+                let dict_prefix = llvm_prefix(&dict_ll_ty);
+                // let elem_ty = self.llvm_type(item_ty)?;
+
+                // Get data for batch insert
+                let bf_tmp = self.gen_load_var(&bf_ll_sym, &bf_ll_ty, ctx)?;
+                let dict_tmp = self.gen_load_var(&dict_ll_sym, &dict_ll_ty, ctx)?;
+                let bf_i8 = ctx.var_ids.next();
+                // let items_tmp = ctx.var_ids.next();
+                let dict_i8 = ctx.var_ids.next();
+
+                ctx.code.add(format!("{} = bitcast {} {} to i8*", bf_i8, bf_ll_ty, bf_tmp));
+                // ctx.code.add(format!("{} = extractvalue {} {}, 0", items_tmp, items_ll_ty, items_vec_tmp));
+                ctx.code.add(format!("{} = bitcast {} {} to i8*", dict_i8, dict_ll_ty, dict_tmp));
+                
+                // Create data for continuation
+                // let combined_params = get_combined_params(&vec![&sir.funcs[cont]]);
+                // let serial_arg_types = self.get_arg_str(&combined_params, "")?;
+                // self.gen_store_args(&combined_params, "", ".ptr", ctx)?;
+
+                self.gen_create_global_mergers(&sir.funcs[cont].params, "", ctx)?;
+                self.gen_load_args(&sir.funcs[cont].params, ".ac", "", ctx)?;
+                let cont_struct = self.gen_create_arg_struct(&sir.funcs[cont].params, ".ac", ctx)?;
+
+                // ctx.code.add(format!("call void @weld_rt_bf_batch_insert(%work_t* %cur.work, i8* {}, i8* {}, i64 {}, i8* {}, void (%work_t*, i32)* @f{}_par)",
+                //                         bf_i8, items_i8, num_items, cont_struct, cont));
+                ctx.code.add(format!("call void @weld_rt_bf_dict_insert(%work_t* %cur.work, i8* {}, i8* {}, i8* {}, void (%work_t*, i32)* @f{}_par)",
+                                        bf_i8, dict_i8, cont_struct, cont));
+                ctx.code.add("br label %body.end");
+            
             }
         }
 

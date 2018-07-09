@@ -1321,14 +1321,19 @@ impl<'t> Parser<'t> {
             }
 
             TBloomBuilder => {
+                let mut args = vec![];
                 try!(self.consume(TOpenBracket));
                 let elem_ty = try!(self.type_());
                 try!(self.consume(TCloseBracket));
                 try!(self.consume(TOpenParen));
-                let capacity = try!(self.expr());
+                args.push(*try!(self.expr()));
+                if *self.peek() == TComma {
+                    try!(self.consume(TComma));
+                    args.push(*try!(self.expr()));
+                }
                 try!(self.consume(TCloseParen));
 
-                let mut expr = expr_box(NewBuilder(vec![*capacity]), Annotations::new());
+                let mut expr = expr_box(NewBuilder(args), Annotations::new());
                 expr.ty = Builder(BloomBuilder(Box::new(elem_ty.clone())), annotations);
 
                 Ok(expr)

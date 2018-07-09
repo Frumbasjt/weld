@@ -142,6 +142,8 @@ declare i8*     @weld_rt_bf_new(i64)
 declare void    @weld_rt_bf_add(i8*, i32)
 declare i1      @weld_rt_bf_contains(i8*, i32)
 declare void    @weld_rt_bf_free(i8*)
+declare void    @weld_rt_bf_batch_insert(%work_t*, i8*, i8*, i64, i8*, void (%work_t*, i32)*)
+declare void    @weld_rt_bf_dict_insert(%work_t*, i8*, i8*, i8*, void (%work_t*, i32)*)
 
 declare void    @weld_rt_defer_build(i32, void (i1*)*, void (%work_t*, i32)*, i8*, i8**)
 declare i8*     @weld_rt_get_defered_result(i32)
