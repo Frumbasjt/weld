@@ -169,11 +169,26 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
 
         BinOp { kind, ref left, ref right } => {
             use super::ast::BinOpKind::*;
-            let left = to_string_impl(left, config);
-            let right = to_string_impl(right, config);
+
+            let mut left_str = to_string_impl(left, config);
+            if let BinOp { kind, .. } = left.kind {
+                match kind {
+                    Max | Min | Pow => {}
+                    _ => { left_str = format!("({})", left_str); }
+                }
+            }
+
+            let mut right_str = to_string_impl(right, config);
+            if let BinOp { kind, .. } = right.kind {
+                match kind {
+                    Max | Min | Pow => {}
+                    _ => { right_str = format!("({})", right_str); }
+                }
+            }
+
             match kind {
-                Max | Min | Pow => format!("{}({},{})", kind, left, right),
-                _ => format!("({}{}{})", left, kind, right)
+                Max | Min | Pow => format!("{}({},{})", kind, left_str, right_str),
+                _ => format!("{}{}{}", left_str, kind, right_str)
             }
         }
 
@@ -222,9 +237,9 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
             let value_str = to_string_impl(value, config);
             let body = to_string_impl(body, config);
             if config.show_types {
-                format!("(let {}:{}=({});{}{}{})", name, value.ty, value_str, newline, indent_str, body)
+                format!("let {}:{} = {};{}{}{}", name, value.ty, value_str, newline, less_indent_str, body)
             } else {
-                format!("(let {}=({});{}{}{})", name, value_str, newline, indent_str, body)
+                format!("let {} = {};{}{}{}", name, value_str, newline, less_indent_str, body)
             }
         }
 
@@ -319,10 +334,8 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
         }
 
         Res { ref builder } => {
-            config.indent += INDENT_LEVEL;
             let builder = to_string_impl(builder, config);
-            config.indent -= INDENT_LEVEL;
-            format!("result({}{}{}{}{})", newline, indent_str, builder, newline, less_indent_str)
+            format!("result({})", builder)
         }
 
         Merge { ref builder, ref value } => {
@@ -398,5 +411,9 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
             format!("bfcontains({},{})", to_string_impl(bf, config), to_string_impl(item, config))
         }
     };
-    format!("{}{}", expr.annotations, expr_str)
+    if expr.annotations.values.len() > 0 {
+        format!("{}{}{}{}", expr.annotations, newline, less_indent_str, expr_str)
+    } else {
+        format!("{}{}", expr.annotations, expr_str)
+    }
 }

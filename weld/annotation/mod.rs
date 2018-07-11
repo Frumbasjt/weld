@@ -130,10 +130,10 @@ impl fmt::Display for AnnotationValue {
                     AnnotationValue::VBranchSelectivity(ref v) => format!("{}", v),
                     AnnotationValue::VNumKeys(ref v) => format!("{}", v),
                     AnnotationValue::VRunVars(ref v) => {
-                        v.iter().map(|(s,e)| format!("{}={}", s, e.pretty_print())).collect::<Vec<_>>().join(";")
+                        v.iter().map(|(s,e)| format!("{}={}", s, str::replace(&e.pretty_print(), "\n", ""))).collect::<Vec<_>>().join(";")
                     },
-                    AnnotationValue::VCountCalls(ref v) => v.pretty_print(),
-                    AnnotationValue::VDeferedUntil(ref expr) => expr.pretty_print(),
+                    AnnotationValue::VCountCalls(ref v) => str::replace(&v.pretty_print(), "\n", ""),
+                    AnnotationValue::VDeferedUntil(ref expr) => str::replace(&str::replace(&expr.pretty_print(), "\n", ""), "  ", ""),
                     AnnotationValue::VSwitchInstrumented(ref v) => {
                         v.iter().map(|e| e.pretty_print()).collect::<Vec<_>>().join(",")
                     },

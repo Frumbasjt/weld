@@ -159,10 +159,9 @@ pub fn getfield_expr(expr: Expr, index: u32) -> WeldResult<Expr> {
 }
 
 pub fn length_expr(expr: Expr) -> WeldResult<Expr> {
-    if let Vector(_) = expr.ty {
-        new_expr(Length { data: Box::new(expr) }, Scalar(ScalarKind::I64))
-    } else {
-        compile_err!("Internal error: Mismatched types in length_expr")
+    match expr.ty {
+        Vector(_) | Dict(_, _) => new_expr(Length { data: Box::new(expr) }, Scalar(ScalarKind::I64)),
+        _ => compile_err!("Internal error: Mismatched types in length_expr")
     }
 }
 
@@ -438,7 +437,10 @@ pub fn newbuilder_expr(kind: BuilderKind, args: Vec<Expr>) -> WeldResult<Expr> {
             if 0 < args.len() && args.len() < 3 {
                 if let Scalar(ScalarKind::I64) = args[0].ty {
                     if args.len() > 1 {
-                    // TODO: implement this argument
+                        if let Dict(_, _) = args[1].ty {
+                            passed = true;
+                            // TODO: check the bf and dict key types
+                        }
                     } else {
                         passed = true;
                     }

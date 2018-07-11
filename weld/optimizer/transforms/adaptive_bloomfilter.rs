@@ -244,29 +244,33 @@ pub fn adaptive_bf_phase_2(expr: &mut Expr) {
 fn gen_bloomfilter(dict_ident: &Expr, sym_gen: &mut SymbolGenerator) -> WeldResult<Expr> {
     if let Ident(ref dict_sym) = dict_ident.kind {
         if let Dict(ref key_ty, _) = dict_ident.ty {
-            // Dictionary and dict keys expressions
-            let keys_sym = sym_gen.new_symbol(&format!("{}_keys", dict_sym));
-            let keys = keys_expr(dict_ident.clone()).unwrap();
-            let keys_ident = ident_expr(keys_sym.clone(), keys.ty.clone()).unwrap();
-            let keys_length = length_expr(keys_ident.clone()).unwrap();
+            // // Dictionary and dict keys expressions
+            // let keys_sym = sym_gen.new_symbol(&format!("{}_keys", dict_sym));
+            // let keys = keys_expr(dict_ident.clone()).unwrap();
+            // let keys_ident = ident_expr(keys_sym.clone(), keys.ty.clone()).unwrap();
+            // let keys_length = length_expr(keys_ident.clone()).unwrap();
             
-            // Build the for loop
-            let iter = Iter::new_simple(keys_ident);
-            let builder = newbuilder_expr(BloomBuilder(key_ty.clone()), vec![keys_length]).unwrap();
-            let params = vec![
-                Parameter::new(sym_gen.new_symbol("b"), builder.ty.clone()),
-                Parameter::new(sym_gen.new_symbol("i"), Scalar(I64)),
-                Parameter::new(sym_gen.new_symbol("e"), *key_ty.clone())
-            ];
-            let b_ident = ident_expr(params[0].name.clone(), builder.ty.clone()).unwrap();
-            let e_ident = ident_expr(params[2].name.clone(), *key_ty.clone()).unwrap();
-            let merge = merge_expr(b_ident, e_ident).unwrap();
-            let func = lambda_expr(params, merge).unwrap();
-            let par_loop = for_expr(vec![iter], builder, func, false).unwrap();
+            // // Build the for loop
+            // let iter = Iter::new_simple(keys_ident);
+            // let builder = newbuilder_expr(BloomBuilder(key_ty.clone()), vec![keys_length]).unwrap();
+            // let params = vec![
+            //     Parameter::new(sym_gen.new_symbol("b"), builder.ty.clone()),
+            //     Parameter::new(sym_gen.new_symbol("i"), Scalar(I64)),
+            //     Parameter::new(sym_gen.new_symbol("e"), *key_ty.clone())
+            // ];
+            // let b_ident = ident_expr(params[0].name.clone(), builder.ty.clone()).unwrap();
+            // let e_ident = ident_expr(params[2].name.clone(), *key_ty.clone()).unwrap();
+            // let merge = merge_expr(b_ident, e_ident).unwrap();
+            // let func = lambda_expr(params, merge).unwrap();
+            // let par_loop = for_expr(vec![iter], builder, func, false).unwrap();
 
-            // Declare keys before for loop, and return the result of the whole
-            let keys_let = let_expr(keys_sym.clone(), keys, par_loop).unwrap();
-            let result = result_expr(keys_let).unwrap();
+            // // Declare keys before for loop, and return the result of the whole
+            // let keys_let = let_expr(keys_sym.clone(), keys, par_loop).unwrap();
+            // let result = result_expr(keys_let).unwrap();
+
+            let dict_length = length_expr(dict_ident.clone()).unwrap();
+            let builder = newbuilder_expr(BloomBuilder(key_ty.clone()), vec![dict_length, dict_ident.clone()]).unwrap();
+            let result = result_expr(builder).unwrap();
 
             return Ok(result);
         }
