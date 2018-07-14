@@ -263,6 +263,7 @@ pub fn compile_program(program: &Program, conf: &ParsedConf, stats: &mut Compila
         // Write the optimized LLVM code and assembly.
         write_code(&llvm_op_code.optimized_llvm, "ll", format!("{}-opt", timestamp).as_ref(), &conf.dump_code.dir);
         write_code(&llvm_op_code.assembly, "S", format!("{}-opt", timestamp).as_ref(), &conf.dump_code.dir);
+        write_code(&stats.pretty_print(false), "times", format!("{}", timestamp).as_ref(), &conf.dump_code.dir);
     }
 
     if let Function(ref param_tys, ref return_ty) = expr.ty {

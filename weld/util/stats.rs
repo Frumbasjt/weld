@@ -37,7 +37,10 @@ impl CompilationStats {
     }
 
     /// Returns pretty-printed statistics stored in `self`.
-    pub fn pretty_print(&self) -> String {
+    pub fn pretty_print(&self, color: bool) -> String {
+        let green = if color { "[0;32m" } else { "" };
+        let white = if color { "[0m" } else { "" };
+
         let mut result = String::new();
         result.push_str("Weld Compiler:\n");
         let mut total = Duration::milliseconds(0);
@@ -45,7 +48,7 @@ impl CompilationStats {
             result.push_str(&format!("\t{}: {:.3} ms\n", name, CompilationStats::format_time(dur)));
             total = total + *dur;
         }
-        result.push_str(&format!("\t\x1b[0;32mWeld Compiler Total\x1b[0m {} ms\n", CompilationStats::format_time(&total)));
+        result.push_str(&format!("\t\x1b{}Weld Compiler Total\x1b{} {} ms\n", green, white, CompilationStats::format_time(&total)));
 
         let mut total = Duration::milliseconds(0);
         result.push_str("Weld Optimization Passes:\n");
@@ -53,7 +56,7 @@ impl CompilationStats {
             result.push_str(&format!("\t{}: {:.3} ms\n", name, CompilationStats::format_time(dur)));
             total = total + *dur;
         }
-        result.push_str(&format!("\t\x1b[0;32mWeld Optimization Passes Total\x1b[0m {} ms\n", CompilationStats::format_time(&total)));
+        result.push_str(&format!("\t\x1b{}Weld Optimization Passes Total\x1b{} {} ms\n", green, white, CompilationStats::format_time(&total)));
 
         let mut total = Duration::milliseconds(0);
         result.push_str("LLVM:\n");
@@ -61,7 +64,7 @@ impl CompilationStats {
             result.push_str(&format!("\t{}: {:.3} ms\n", name, CompilationStats::format_time(dur)));
             total = total + *dur;
         }
-        result.push_str(&format!("\t\x1b[0;32mLLVM Total\x1b[0m {} ms\n", CompilationStats::format_time(&total)));
+        result.push_str(&format!("\t\x1b{}LLVM Total\x1b{} {} ms\n", green, white, CompilationStats::format_time(&total)));
 
         result
     }
