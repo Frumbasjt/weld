@@ -714,7 +714,7 @@ fn binop_test() {
     let left = literal_expr(LiteralKind::I32Literal(1)).unwrap();
     let expr = binop_expr(BinOpKind::Add, left, right).unwrap();
 
-    assert_eq!(print_expr_without_indent(&expr), "(1+1)");
+    assert_eq!(print_expr_without_indent(&expr), "1+1");
     assert_eq!(expr.ty, Scalar(ScalarKind::I32));
 }
 

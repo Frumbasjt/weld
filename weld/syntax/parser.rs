@@ -1577,41 +1577,41 @@ impl<'t> Parser<'t> {
 #[test]
 fn basic_parsing() {
     let e = parse_expr("10 - 2 - 3 + 1").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(((10-2)-3)+1)");
+    assert_eq!(print_expr_without_indent(&e), "((10-2)-3)+1");
 
     let e = parse_expr("10 * 2 - 4 - 3 / 1").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(((10*2)-4)-(3/1))");
+    assert_eq!(print_expr_without_indent(&e), "((10*2)-4)-(3/1)");
 
     let e = parse_expr("i32(10 + 3 + 2)").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(i32(((10+3)+2)))");
+    assert_eq!(print_expr_without_indent(&e), "(i32((10+3)+2))");
 
     let e = parse_expr("10 + 64 + i32(10.0)").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "((10+64)+(i32(10.0)))");
+    assert_eq!(print_expr_without_indent(&e), "(10+64)+(i32(10.0))");
 
     let e = parse_expr("10 + 64 + f32(bool(19))").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "((10+64)+(f32((bool(19)))))");
+    assert_eq!(print_expr_without_indent(&e), "(10+64)+(f32((bool(19))))");
 
     let e = parse_expr("1L:i64 + i64(1)").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(1L+(i64(1)))");
+    assert_eq!(print_expr_without_indent(&e), "1L+(i64(1))");
 
     let e = parse_expr("i64(1L:i64)").unwrap();
     assert_eq!(print_expr_without_indent(&e), "(i64(1L))");
 
     let e = parse_expr("[1, 2+3, 2]").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "[1,(2+3),2]");
+    assert_eq!(print_expr_without_indent(&e), "[1,2+3,2]");
 
-    let e = parse_expr("let a = 3+2; let b = (let c=a; c); b").unwrap();
+    let e = parse_expr("let a = 3+2; let b = (let c = a; c); b").unwrap();
     assert_eq!(print_expr_without_indent(&e),
-               "(let a=((3+2));(let b=((let c=(a);c));b))");
+               "let a = 3+2;let b = (let c = a;c);b");
 
     let e = parse_expr("let a: vec[i32] = [2, 3]; a").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(let a=([2,3]);a)");
+    assert_eq!(print_expr_without_indent(&e), "let a = [2,3];a");
 
     let e = parse_expr("|a, b:i32| a+b").unwrap();
-    assert_eq!(print_typed_expr_without_indent(&e), "|a:?,b:i32|(a:?+b:?)");
+    assert_eq!(print_typed_expr_without_indent(&e), "|a:?,b:i32|a:?+b:?");
 
     let e = parse_expr("|| a||b").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "||(a||b)");
+    assert_eq!(print_expr_without_indent(&e), "||a||b");
 
     let e = parse_expr("a.$0.$1").unwrap();
     assert_eq!(print_expr_without_indent(&e), "a.$0.$1");
@@ -1623,7 +1623,7 @@ fn basic_parsing() {
     assert_eq!(print_expr_without_indent(&e), "((a.$0)(0,1).$1)()");
 
     let e = parse_expr("a>b==c").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "((a>b)==c)");
+    assert_eq!(print_expr_without_indent(&e), "(a>b)==c");
 
     assert!(parse_expr("a>b>c").is_err());
     assert!(parse_expr("a==b==c").is_err());
@@ -1648,7 +1648,7 @@ fn basic_parsing() {
     assert!(parse_expr("@(impl:local, num_keys:12) dictmerger[i32,i32,+]").is_err());
 
     let e = parse_expr("a: i32 + b").unwrap();
-    assert_eq!(print_typed_expr_without_indent(&e), "(a:i32+b:?)");
+    assert_eq!(print_typed_expr_without_indent(&e), "a:i32+b:?");
 
     let e = parse_expr("|a:i8| a").unwrap();
     assert_eq!(print_typed_expr_without_indent(&e), "|a:i8|a:?");
@@ -1658,7 +1658,7 @@ fn basic_parsing() {
     let p = parse_program("macro a(x) = x+x; macro b() = 5; a(b)").unwrap();
     assert_eq!(p.macros.len(), 2);
     assert_eq!(print_expr_without_indent(&p.body), "(a)(b)");
-    assert_eq!(print_expr_without_indent(&p.macros[0].body), "(x+x)");
+    assert_eq!(print_expr_without_indent(&p.macros[0].body), "x+x");
     assert_eq!(print_expr_without_indent(&p.macros[1].body), "5");
 
     let ref t = parse_type("{i32, vec[vec[?]], ?}").unwrap().to_string();
@@ -1671,23 +1671,23 @@ fn basic_parsing() {
 #[test]
 fn operator_precedence() {
     let e = parse_expr("a - b - c - d").unwrap();
-    assert_eq!(print_expr_without_indent(&e), "(((a-b)-c)-d)");
+    assert_eq!(print_expr_without_indent(&e), "((a-b)-c)-d");
 
     let e = parse_expr("a || b && c | d ^ e & f == g > h + i * j").unwrap();
     assert_eq!(print_expr_without_indent(&e),
-               "(a||(b&&(c|(d^(e&(f==(g>(h+(i*j)))))))))");
+               "a||(b&&(c|(d^(e&(f==(g>(h+(i*j))))))))");
 
     let e = parse_expr("a * b + c > d == e & f ^ g | h && i || j").unwrap();
     assert_eq!(print_expr_without_indent(&e),
-               "(((((((((a*b)+c)>d)==e)&f)^g)|h)&&i)||j)");
+               "((((((((a*b)+c)>d)==e)&f)^g)|h)&&i)||j");
 
     let e = parse_expr("a / b - c <= d != e & f ^ g | h && i || j").unwrap();
     assert_eq!(print_expr_without_indent(&e),
-               "(((((((((a/b)-c)<=d)!=e)&f)^g)|h)&&i)||j)");
+               "((((((((a/b)-c)<=d)!=e)&f)^g)|h)&&i)||j");
 
     let e = parse_expr("a % b - c >= d != e & f ^ g | h && i || j").unwrap();
     assert_eq!(print_expr_without_indent(&e),
-               "(((((((((a%b)-c)>=d)!=e)&f)^g)|h)&&i)||j)");
+               "((((((((a%b)-c)>=d)!=e)&f)^g)|h)&&i)||j");
 }
 
 #[test]
@@ -1738,22 +1738,22 @@ fn parse_and_print_literal_expressions() {
 #[test]
 fn parse_and_print_simple_expressions() {
     let e = parse_expr("23 + 32").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "(23+32)");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "23+32");
 
     let e = parse_expr("2 - 3 - 4").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "((2-3)-4)");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "(2-3)-4");
 
     let e = parse_expr("2 - (3 - 4)").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "(2-(3-4))");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "2-(3-4)");
 
     let e = parse_expr("a").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(), "a");
 
     let e = parse_expr("let a = 2; a").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "(let a=(2);a)");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "let a = 2;a");
 
     let e = parse_expr("let a = 2.0; a").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "(let a=(2.0);a)");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "let a = 2.0;a");
 
     let e = parse_expr("[1, 2, 3]").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(), "[1,2,3]");
@@ -1762,36 +1762,36 @@ fn parse_and_print_simple_expressions() {
     assert_eq!(print_expr_without_indent(&e).as_str(), "[1.0,2.0,3.0]");
 
     let e = parse_expr("|a, b| a + b").unwrap();
-    assert_eq!(print_expr_without_indent(&e).as_str(), "|a:?,b:?|(a+b)");
+    assert_eq!(print_expr_without_indent(&e).as_str(), "|a:?,b:?|a+b");
 
     let e = parse_expr("for(d, appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(d,appender[?],|e|(e+1))");
+               "for(d,appender[?],|e|e+1)");
 }
 
 #[test]
 fn parse_and_print_for_expressions() {
     let e = parse_expr("for(d, appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(d,appender[?],|e|(e+1))");
+               "for(d,appender[?],|e|e+1)");
 
     let e = parse_expr("for(iter(d), appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(d,appender[?],|e|(e+1))");
+               "for(d,appender[?],|e|e+1)");
 
     let e = parse_expr("for(iter(d,0L,4L,1L), appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(iter(d,0L,4L,1L),appender[?],|e|(e+1))");
+               "for(iter(d,0L,4L,1L),appender[?],|e|e+1)");
 
     let e = parse_expr("for(zip(d), appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(d,appender[?],|e|(e+1))");
+               "for(d,appender[?],|e|e+1)");
 
     let e = parse_expr("for(zip(d,e), appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(zip(d,e),appender[?],|e|(e+1))");
+               "for(zip(d,e),appender[?],|e|e+1)");
 
     let e = parse_expr("for(zip(a,b,iter(c,0L,4L,1L),iter(d)), appender, |e| e+1)").unwrap();
     assert_eq!(print_expr_without_indent(&e).as_str(),
-               "for(zip(a,b,iter(c,0L,4L,1L),d),appender[?],|e|(e+1))");
+               "for(zip(a,b,iter(c,0L,4L,1L),d),appender[?],|e|e+1)");
 }

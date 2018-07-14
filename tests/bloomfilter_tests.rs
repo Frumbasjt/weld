@@ -36,7 +36,7 @@ fn empty_bloomfilter() {
 
 
 #[test]
-fn bloomfilter_batch_insert() {
+fn bloomfilter_batch_insert_large() {
     let code = "|k:vec[i32]|
                 let d=result(for(k,dictmerger[i32,i32,+],|b,i,e|merge(b,{e,0})));
                 let bf=result(bloombuilder[i32](len(d),d));
@@ -44,6 +44,27 @@ fn bloomfilter_batch_insert() {
     let ref conf = many_threads_conf();
 
     let size = 100000;
+    let mut input_vec: Vec<i32> = vec![];
+    for i in 0..size {
+        input_vec.push(i as i32);
+    }
+    let ref input_data = WeldVec::from(&input_vec);
+
+    let ret_value = compile_and_run(code, conf, input_data);
+    let data = ret_value.data() as *const i32;
+    let result = unsafe { (*data).clone() };
+    assert_eq!(result, size);
+}
+
+#[test]
+fn bloomfilter_batch_insert_small() {
+    let code = "|k:vec[i32]|
+                let d=result(for(k,dictmerger[i32,i32,+],|b,i,e|merge(b,{e,0})));
+                let bf=result(bloombuilder[i32](len(d),d));
+                result(for(k,merger[i32,+],|b,i,e|if(bfcontains(bf,e),merge(b,1),b)))";
+    let ref conf = many_threads_conf();
+
+    let size = 100;
     let mut input_vec: Vec<i32> = vec![];
     for i in 0..size {
         input_vec.push(i as i32);

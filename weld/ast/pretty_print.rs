@@ -170,20 +170,28 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
         BinOp { kind, ref left, ref right } => {
             use super::ast::BinOpKind::*;
 
-            let mut left_str = to_string_impl(left, config);
-            if let BinOp { kind, .. } = left.kind {
-                match kind {
-                    Max | Min | Pow => {}
-                    _ => { left_str = format!("({})", left_str); }
+            // Check if we should wrap a sub expression in parentheses
+            fn wrap_in_parentheses(expr: &Expr) -> bool {
+                match expr.kind {
+                    BinOp { kind, .. } => {
+                        match kind {
+                            Max | Min | Pow => false,
+                            _ => true
+                        }
+                    }
+                    Let { .. } => true,
+                    _ => false
                 }
             }
 
+            let mut left_str = to_string_impl(left, config);
+            if wrap_in_parentheses(left) {
+                left_str = format!("({})", left_str);
+            }
+
             let mut right_str = to_string_impl(right, config);
-            if let BinOp { kind, .. } = right.kind {
-                match kind {
-                    Max | Min | Pow => {}
-                    _ => { right_str = format!("({})", right_str); }
-                }
+            if wrap_in_parentheses(right) {
+                right_str = format!("({})", right_str);
             }
 
             match kind {
@@ -234,7 +242,13 @@ fn to_string_impl(expr: &Expr, config: &mut PrettyPrintConfig) -> String {
         }
 
         Let { ref name, ref value, ref body } => {
-            let value_str = to_string_impl(value, config);
+            let mut value_str = to_string_impl(value, config);
+            // Check if we should wrap a sub expression in parentheses
+            match value.kind {
+                Let { .. } => { value_str = format!("({})", value_str); },
+                _ => {}
+            }
+
             let body = to_string_impl(body, config);
             if config.show_types {
                 format!("let {}:{} = {};{}{}{}", name, value.ty, value_str, newline, less_indent_str, body)

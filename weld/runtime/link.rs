@@ -161,13 +161,6 @@ extern "C" {
     #[no_mangle]
     pub fn weld_rt_set_defered_result(id: int32_t, result: *mut c_void);
     #[no_mangle]
-    pub fn weld_rt_bf_batch_insert(w: *mut work_t,
-                                   bf: *mut c_void,
-                                   items: *mut c_void,
-                                   num_items: int64_t,
-                                   cont_data: *mut c_void,
-                                   cont: extern "C" fn(*mut work_t));
-    #[no_mangle]
     pub fn weld_rt_bf_dict_insert(w: *mut work_t,
                                   bf: *mut c_void,
                                   d: *mut c_void,
