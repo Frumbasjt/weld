@@ -709,6 +709,9 @@ static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
       } else { // done_exploiting == true
         // fprintf(stderr, "EXPLOIT\n");
         int32_t exploit_flav_idx = get_best_flavor(rd, task);
+        if (rd->adaptive_log_out) {
+          fprintf(rd->adaptive_log_out, "Exploiting flavor %d\n", exploit_flav_idx);
+        }
         flavor_t *exploit_flav = &task->flavors[exploit_flav_idx];
         exploit_flav->last_chosen = task->profile->calls;
         exploit_flav->prev_cycles = exploit_flav->tot_cycles;
@@ -722,6 +725,9 @@ static inline void update_flavor(run_data *rd, work_t *task, int64_t cycles) {
     if (task->profile->calls > task->vw_greedy->explore_start) {
       // fprintf(stderr, "EXPLORE\n");
       int32_t explore_flav_idx = get_lru_flavor(rd, task);
+      if (rd->adaptive_log_out) {
+        fprintf(rd->adaptive_log_out, "Thread %d exploring flavor %d\n", my_id, explore_flav_idx);
+      }
       flavor_t *explore_flav = &task->flavors[explore_flav_idx];
       explore_flav->last_chosen = task->profile->calls;
       explore_flav->prev_cycles = explore_flav->tot_cycles;
