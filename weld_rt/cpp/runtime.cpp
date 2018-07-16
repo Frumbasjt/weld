@@ -392,7 +392,7 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   if (task->cont == NULL) {
     task->profile->end_cycle = get_cycles();
     if (rd->profile_out != NULL) {
-      fprintf(rd->profile_out, "%lld,%lld,%lld,%d,%lld,%lld\n", 
+      fprintf(rd->profile_out, "%lld,%llu,%llu,%u,%llu,%llu\n", 
                                 task->task_id, 
                                 task->profile->start_cycle, 
                                 task->profile->end_cycle,
