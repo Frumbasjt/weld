@@ -14,6 +14,7 @@
 #include <limits>
 #include <time.h>
 #include <sys/time.h>
+#include <chrono>
 
 static inline uint64_t get_cycles() {
   uint64_t a, d;
@@ -21,13 +22,10 @@ static inline uint64_t get_cycles() {
   return a | (d<<32);
 }
 
-static inline double get_wall_time(){
-    struct timeval time;
-    if (gettimeofday(&time,NULL)){
-        //  Handle error
-        return 0;
-    }
-    return (double)time.tv_sec + (double)time.tv_usec * .000001;
+static inline uint64_t get_wall_time_ms(){
+  auto now = std::chrono::system_clock::now();
+  auto now_ms = std::chrono::time_point_cast<std::chrono::milliseconds>(now);
+  return std::chrono::duration_cast<std::chrono::milliseconds>(now_ms.time_since_epoch()).count();
 }
 
 // These is needed to ensure each grain size is divisible by the SIMD vector size. A value of 64
@@ -366,15 +364,15 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       run_data *rd = get_run_data();
       void *module = rd->module;
       for (auto const& flavor : *to_compile) {
-        double t1, t2;
+        uint64_t t1, t2;
         if (rd->adaptive_log_out) {
           fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
-          t1 = get_wall_time();
+          t1 = get_wall_time_ms();
         }
         flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
         if (rd->adaptive_log_out) {
-          t2 = get_wall_time();
-          fprintf(rd->adaptive_log_out, "Done compiling f%d (took %fs)\n", flavor->func_id, t2 - t1);
+          t2 = get_wall_time_ms();
+          fprintf(rd->adaptive_log_out, "Done compiling f%d (took %lldms)\n", flavor->func_id, t2 - t1);
         }
       }
       delete to_compile;
@@ -391,14 +389,17 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
 static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
   if (task->cont == NULL) {
     task->profile->end_cycle = get_cycles();
+    task->profile->end_time = get_wall_time_ms();
     if (rd->profile_out != NULL) {
-      fprintf(rd->profile_out, "%lld,%llu,%llu,%u,%llu,%llu\n", 
+      fprintf(rd->profile_out, "%lld,%llu,%llu,%u,%llu,%llu,%llu,%llu\n", 
                                 task->task_id, 
                                 task->profile->start_cycle, 
                                 task->profile->end_cycle,
                                 task->profile->calls,
                                 task->profile->tot_cycles,
-                                task->profile->tot_tuples);
+                                task->profile->tot_tuples,
+                                task->profile->start_time,
+                                task->profile->end_time);
     }
     if (!task->continued) {
       // if this task has no continuation and there was no for loop to end it,
@@ -414,6 +415,7 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
     int32_t previous = __sync_fetch_and_sub(&task->cont->deps, 1);
     if (previous == 1) {
       task->profile->end_cycle = get_cycles();
+      task->profile->end_time = get_wall_time_ms();
       // If the task was instrumented, check if there are defered lets
       // to execute and flavors to compile.
       work_t *compile_task = NULL;
@@ -444,13 +446,15 @@ static inline void finish_task(work_t *task, int32_t my_id, run_data *rd) {
 
       // Log profiling info
       if (rd->profile_out != NULL) {
-        fprintf(rd->profile_out, "%lld,%lld,%lld,%d,%lld,%lld\n", 
+        fprintf(rd->profile_out, "%lld,%lld,%lld,%d,%lld,%lld,%llu,%llu\n", 
                                 task->task_id, 
                                 task->profile->start_cycle, 
                                 task->profile->end_cycle,
                                 task->profile->calls,
                                 task->profile->tot_cycles,
-                                task->profile->tot_tuples);
+                                task->profile->tot_tuples,
+                                task->profile->start_time,
+                                task->profile->end_time);
       }
       // Log adaptive info
       if (task->flavor_count > 1 && rd->adaptive_log_out) {
@@ -775,7 +779,9 @@ static inline void work_loop(int32_t my_id, run_data *rd) {
 
         // Run variation
         uint64_t start = get_cycles();
-        __sync_bool_compare_and_swap(&popped->profile->start_cycle, 0, start);
+        if (__sync_bool_compare_and_swap(&popped->profile->start_cycle, 0, start)) {
+          popped->profile->start_time = get_wall_time_ms();
+        }
         // fprintf(stdout, "thread %d: task %lld var %d | lo: %d hi %d\n", my_id, popped->task_id, choice, popped->lower, popped->upper);
         popped->flavors[choice].fp(popped, choice);
         uint64_t end = get_cycles();
@@ -890,7 +896,7 @@ extern "C" int64_t weld_run_begin(par_func_t run, void *data, int64_t mem_limit,
     char file_path[28];
     sprintf(file_path, "profile-%010lld-%04lld.csv", timestamp, my_run_id);
     rd->profile_out = fopen(file_path, "w");
-    fprintf(rd->profile_out, "task_id,start_cycle,end_cycle,calls,tot_cycles,tot_tuples\n");
+    fprintf(rd->profile_out, "task_id,start_cycle,end_cycle,calls,tot_cycles,tot_tuples,start_time,end_time\n");
   }
   if (log_adaptive) {
     char file_path[28];

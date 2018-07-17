@@ -26,6 +26,8 @@ typedef struct profile_stats_t {
   uint64_t tot_cycles;
   uint64_t start_cycle;
   uint64_t end_cycle;
+  uint64_t start_time;
+  uint64_t end_time;
 } profile_stats_t;
 
 // statistics for the vw-greedy algorithm
