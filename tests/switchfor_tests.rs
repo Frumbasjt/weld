@@ -81,7 +81,7 @@ fn switchfor_instrumented() {
             @(switch_if_initialized:one)
             |lb,ub|for(x,bld,|b,i,e|merge(b,one))
         ))";
-    let mut conf = default_conf();
+    let mut conf = many_threads_conf();
     conf.set("weld.adaptive.lazyCompilation", "true");
 
     let mut input_vec: Vec<i32> = vec![];

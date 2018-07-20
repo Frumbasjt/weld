@@ -364,20 +364,22 @@ static inline work_t *finish_instrumented(work_t *task, int32_t my_id, run_data 
       run_data *rd = get_run_data();
       void *module = rd->module;
       for (auto const& flavor : *to_compile) {
-        uint64_t t1, t2;
-        if (rd->adaptive_log_out) {
-          fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
-          t1 = get_wall_time_ms();
-        }
-        flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
-        if (rd->adaptive_log_out) {
-          t2 = get_wall_time_ms();
-          fprintf(rd->adaptive_log_out, "Done compiling f%d (took %lldms)\n", flavor->func_id, t2 - t1);
+        if (!rd->done) {
+          uint64_t t1, t2;
+          if (rd->adaptive_log_out) {
+            fprintf(rd->adaptive_log_out, "Started compiling f%d\n", flavor->func_id);
+            t1 = get_wall_time_ms();
+          }
+          flavor->fp = weld_rt_compile_func(module, flavor->func_id); 
+          if (rd->adaptive_log_out) {
+            t2 = get_wall_time_ms();
+            fprintf(rd->adaptive_log_out, "Done compiling f%d (took %lldms)\n", flavor->func_id, t2 - t1);
+          }
         }
       }
       delete to_compile;
     }, (void *)to_compile, rd);
-
+    compile_task->continued = true;
     return compile_task;
   }
   return NULL;
